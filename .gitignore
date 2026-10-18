@@ -1,0 +1,36 @@
+# Build outputs
+/bin/
+/dist/
+
+# Local runtime artefacts (never commit)
+/logs/
+*.out
+*.err
+*.exe
+*.exe~
+
+# 强约束：根目录不许出现 plcbridge.exe / plcbridge-web.exe（必须放 bin/）。
+# 历史 BUG（2026-10-13）：subagent 跑 `go build` 没带 -o，产物落到项目根，
+# 出现 root 和 bin/ 两份相同副本的混乱。所有构建走 `make build`（见 Makefile）。
+# 如需在根目录放临时的辅助工具，命名用 -root 后缀避免误判。
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local config overrides (use config.example.json as template)
+config.json
+.env
+
+# Backups
+/backup/
+
+# Web 依赖与构建产物
+web/node_modules/
+web/dist/
+internal/interface/web/dist/
+
+# Go vendor / 临时文件 (项目目前未使用 vendor)
+vendor/
