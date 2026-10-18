@@ -1,0 +1,26 @@
+[Unit]
+Description=PlcBridge Web Admin (SQLite + REST API)
+Documentation=https://github.com/plcbridge/plcbridge
+After=network.target
+
+[Service]
+Type=simple
+User=plcbridge
+Group=plcbridge
+WorkingDirectory=/opt/plcbridge
+ExecStart=/opt/plcbridge/bin/plcbridge-web --config /etc/plcbridge --addr :8080
+Restart=always
+RestartSec=5
+
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+LimitNOFILE=65536
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=plcbridge-web
+
+[Install]
+WantedBy=multi-user.target

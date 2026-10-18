@@ -1,0 +1,32 @@
+[Unit]
+Description=PlcBridge Core Service (collect + forward + write)
+Documentation=https://github.com/plcbridge/plcbridge
+After=network.target plcbridge-web.service
+Wants=plcbridge-web.service
+
+[Service]
+Type=simple
+User=plcbridge
+Group=plcbridge
+WorkingDirectory=/opt/plcbridge
+ExecStart=/opt/plcbridge/bin/plcbridge --config /etc/plcbridge
+Restart=always
+RestartSec=5
+
+# 优雅退出：SIGTERM 触发 shutdown，5 秒后强制 kill
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# 资源限制（推荐基线 200 PLC × 70k 点）
+LimitNOFILE=65536
+LimitNPROC=8192
+MemoryMax=4G
+
+# 日志输出到 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=plcbridge
+
+[Install]
+WantedBy=multi-user.target

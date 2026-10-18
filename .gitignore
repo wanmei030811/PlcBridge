@@ -34,3 +34,27 @@ internal/interface/web/dist/
 
 # Go vendor / 临时文件 (项目目前未使用 vendor)
 vendor/
+
+# 运行时控制 done 标记 (进程启动/停止控制信号,不入库)
+/runtime/
+
+# 启动审计日志 (含 admin 启动状态,不入库)
+/config/web.password.log
+
+# SQLite 数据库与 WAL 模式临时文件 (开发环境数据,不入库)
+/config/data/
+
+# Supervisor 运行时状态 (flag/state,不入库)
+/config/runtime/
+
+# Web 启动引导 + HMAC 密钥 (本地认证密钥,不入库)
+# 开发者首次启动 plcbridge-web 时生成,本地保留即可。
+/config/web.bootstrap
+/config/web.hmac
+
+# TypeScript 编译缓存
+*.tsbuildinfo
+
+# 备份文件 (包括 *.bak / *.bak_xxx / *.bak 日期戳)
+*.bak
+*.bak_*
