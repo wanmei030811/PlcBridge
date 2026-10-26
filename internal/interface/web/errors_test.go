@@ -58,6 +58,43 @@ func TestAPIError_With(t *testing.T) {
 	}
 }
 
+// TestAPIError_WithI18nKey Plan2 主题 B 4.2 预留接口验证。
+//
+// 当前未启用 i18n：所有 I18nKey 应为空；接口本身不报错、字段独立。
+func TestAPIError_WithI18nKey(t *testing.T) {
+	orig := ErrChannelNotFound
+	translated := ErrChannelNotFound.WithI18nKey("errors.channel_not_found")
+	if translated.I18nKey != "errors.channel_not_found" {
+		t.Errorf("I18nKey: got %q, want \"errors.channel_not_found\"", translated.I18nKey)
+	}
+	if translated.Message != orig.Message {
+		t.Errorf("WithI18nKey 不应修改 Message: got %q, want %q", translated.Message, orig.Message)
+	}
+	if translated.Code != orig.Code {
+		t.Errorf("WithI18nKey 不应修改 Code")
+	}
+	// 链路组合：With(msg).WithI18nKey(key) 两个字段独立
+	combined := ErrChannelNotFound.With("custom msg").WithI18nKey("errors.channel_not_found")
+	if combined.Message != "custom msg" || combined.I18nKey != "errors.channel_not_found" {
+		t.Errorf("链式 .With().WithI18nKey() 字段丢失: msg=%q key=%q", combined.Message, combined.I18nKey)
+	}
+}
+
+// TestWriteError_I18nKeyNotEmittedWhenEmpty 验证 I18nKey 为空时响应体不带 i18n_key 字段。
+//
+// 避免给前端带来"需要判断字段存不存在"的负担——未启用 i18n 时与改造前完全一致。
+func TestWriteError_I18nKeyNotEmittedWhenEmpty(t *testing.T) {
+	c, w := newTestCtx()
+	WriteError(c, ErrInvalidParam.With("test")) // 未调 WithI18nKey
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if _, ok := body["i18n_key"]; ok {
+		t.Errorf("I18nKey 为空时不应输出 i18n_key 字段: %v", body)
+	}
+}
+
 // TestWriteError_BusinessError 验证 *APIError 直接翻译为 HTTP 响应。
 func TestWriteError_BusinessError(t *testing.T) {
 	c, w := newTestCtx()
@@ -172,7 +209,7 @@ func TestWriteError_NilError(t *testing.T) {
 func TestAllAPIErrors_HaveUniqueCode(t *testing.T) {
 	all := []*APIError{
 		ErrInvalidParam, ErrAPIAuthFailed, ErrForbidden, ErrAPINotFound, ErrAPIConflict,
-		ErrFKConstraint, ErrInternal,
+		ErrFKConstraint, ErrInternal, ErrPlcbridgeUnavailable,
 		ErrChannelNotFound, ErrChannelRoleMismatch, ErrChannelConflict, ErrChannelConnectFail,
 		ErrDeviceNotFound, ErrDeviceConflict, ErrDeviceDisabled,
 		ErrSourceNotFound, ErrSourceConflict,
@@ -193,7 +230,7 @@ func TestAllAPIErrors_HaveUniqueCode(t *testing.T) {
 func TestAllAPIErrors_Format(t *testing.T) {
 	all := []*APIError{
 		ErrInvalidParam, ErrAPIAuthFailed, ErrForbidden, ErrAPINotFound, ErrAPIConflict,
-		ErrFKConstraint, ErrInternal,
+		ErrFKConstraint, ErrInternal, ErrPlcbridgeUnavailable,
 		ErrChannelNotFound, ErrChannelRoleMismatch, ErrChannelConflict, ErrChannelConnectFail,
 		ErrDeviceNotFound, ErrDeviceConflict, ErrDeviceDisabled,
 		ErrSourceNotFound, ErrSourceConflict,

@@ -1,8 +1,9 @@
 // Package web 进程级 health + ready 端点。
 //
 // 路由：
-//   GET /api/v1/health         : liveness（进程是否还活着），永远 200
-//   GET /api/v1/health/ready   : readiness（依赖是否就绪），可 503（Phase 1.5）
+//
+//	GET /api/v1/health         : liveness（进程是否还活着），永远 200
+//	GET /api/v1/health/ready   : readiness（依赖是否就绪），可 503（Phase 1.5）
 //
 // 设计（Phase 1.5）：
 //   - /health 给前端仪表盘 3s 心跳用，不能因为 DB 抖动就误报

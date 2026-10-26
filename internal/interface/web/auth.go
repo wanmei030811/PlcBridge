@@ -26,11 +26,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
+	"github.com/plcbridge/plcbridge/internal/infra/secconfig"
 )
 
 const (
-	SessionCookieName = "plcbridge_session"
-	SessionTTL        = 12 * time.Hour
+	SessionCookieName   = "plcbridge_session"
+	SessionTTL          = 12 * time.Hour
 	cookieHMACSecretLen = 32
 )
 
@@ -203,7 +204,7 @@ func loginHandler(db *sql.DB, sess *SessionStore) gin.HandlerFunc {
 			Password string `json:"password" binding:"required"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			WriteError(c, ErrInvalidParam.With(err.Error()))
 			return
 		}
 		// 查账号
@@ -213,22 +214,26 @@ func loginHandler(db *sql.DB, sess *SessionStore) gin.HandlerFunc {
 		if err != nil {
 			// 计时攻击防护：无论用户不存在还是密码错，固定返回错
 			_ = bcrypt.CompareHashAndPassword([]byte("$2a$10$abcdefghijklmnopqrstuv"), []byte(req.Password))
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+			WriteError(c, ErrInvalidCredentials)
 			return
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(req.Password)); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
+			WriteError(c, ErrInvalidCredentials)
 			return
 		}
 		cookieVal, err := sess.Issue(req.Username)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		// cookie: HttpOnly + SameSite=Lax（防止 CSRF + 防 XSS 读取）
-		// secure=false（开发支持 HTTP），生产建议前置 TLS 反代后改 true
+		//
+		// secure 属性：启用 TLS 时必须为 true（否则浏览器在 HTTPS 下发、
+		// 明文 HTTP 用时都不会发送 cookie）；未启用 TLS 时保持 false，
+		// 否则明文部署下 cookie 会被浏览器直接丢弃，导致永远登录不上。
+		// 也可用 PLCBRIDGE_SECURE_COOKIE 显式覆盖（如反代终止 TLS 的场景）。
 		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie(SessionCookieName, cookieVal, int(SessionTTL.Seconds()), "/", "", false, true)
+		c.SetCookie(SessionCookieName, cookieVal, int(SessionTTL.Seconds()), "/", "", secconfig.SecureCookie(secconfig.TLSEnabled()), true)
 		c.JSON(http.StatusOK, gin.H{"username": req.Username})
 	}
 }
@@ -240,7 +245,7 @@ func logoutHandler(sess *SessionStore) gin.HandlerFunc {
 			sess.Revoke(v)
 		}
 		c.SetSameSite(http.SameSiteLaxMode)
-		c.SetCookie(SessionCookieName, "", -1, "/", "", false, true)
+		c.SetCookie(SessionCookieName, "", -1, "/", "", secconfig.SecureCookie(secconfig.TLSEnabled()), true)
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	}
 }
@@ -262,28 +267,28 @@ func changePasswordHandler(db *sql.DB) gin.HandlerFunc {
 			NewPassword string `json:"new_password" binding:"required,min=8"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			WriteError(c, ErrInvalidParam.With(err.Error()))
 			return
 		}
 		var pwHash string
 		if err := db.QueryRowContext(c.Request.Context(),
 			`SELECT password_hash FROM accounts WHERE id=1 AND username=?`, username).Scan(&pwHash); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
+			WriteError(c, ErrSessionExpired)
 			return
 		}
 		if err := bcrypt.CompareHashAndPassword([]byte(pwHash), []byte(req.OldPassword)); err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "old password incorrect"})
+			WriteError(c, ErrInvalidCredentials.With("old password incorrect"))
 			return
 		}
 		newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if _, err := db.ExecContext(c.Request.Context(),
 			`UPDATE accounts SET password_hash=?, updated_at=? WHERE id=1`,
 			string(newHash), time.Now().UnixMilli()); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -295,12 +300,14 @@ func RequireSession(sess *SessionStore) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		v, err := c.Cookie(SessionCookieName)
 		if err != nil || v == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "login required"})
+			c.Abort()
+			WriteError(c, ErrAPIAuthFailed.With("login required"))
 			return
 		}
 		username, err := sess.Validate(v)
 		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
+			c.Abort()
+			WriteError(c, ErrSessionExpired)
 			return
 		}
 		c.Set("session_user", username)

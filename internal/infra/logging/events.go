@@ -9,7 +9,8 @@ package logging
 //   - 测试可以加新值（test_ 前缀），但发布前必须移到本表
 //
 // 用法：
-//   logging.Info(EventPollBatchEnd).Str("source", bizID).Msg("采集批次完成")
+//
+//	logging.Info(EventPollBatchEnd).Str("source", bizID).Msg("采集批次完成")
 //
 // 字段约定（§10.1.1）：
 //   - 以下事件的"必填附加字段"在每个常量注释里说明

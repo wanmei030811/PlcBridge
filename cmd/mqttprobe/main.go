@@ -1,14 +1,16 @@
 // mqttprobe —— 用 Eclipse Paho 直连 MQTT broker 探活 + 周期性发布/订阅测试消息。
 //
 // 双协议支持：
-//   -protocol-version v5       → github.com/eclipse/paho.golang (autopaho，自动重连)
-//   -protocol-version v3.1.1   → github.com/eclipse/paho.mqtt.golang (auto-reconnect)
+//
+//	-protocol-version v5       → github.com/eclipse/paho.golang (autopaho，自动重连)
+//	-protocol-version v3.1.1   → github.com/eclipse/paho.mqtt.golang (auto-reconnect)
 //
 // 用法：
-//   go run ./cmd/mqttprobe
-//   go run ./cmd/mqttprobe -broker tcp://127.0.0.1:1883 -topic plcbridge/probe
-//   go run ./cmd/mqttprobe -broker tcp://127.0.0.1:1883 -protocol-version v3.1.1 -sub
-//   go run ./cmd/mqttprobe -broker tls://broker.hivemq.com:8883 -client-id probe-01
+//
+//	go run ./cmd/mqttprobe
+//	go run ./cmd/mqttprobe -broker tcp://127.0.0.1:1883 -topic plcbridge/probe
+//	go run ./cmd/mqttprobe -broker tcp://127.0.0.1:1883 -protocol-version v3.1.1 -sub
+//	go run ./cmd/mqttprobe -broker tls://broker.hivemq.com:8883 -client-id probe-01
 package main
 
 import (
@@ -77,12 +79,12 @@ func runV5(ctx context.Context, brokerURL *url.URL, clientID, username, password
 	keepalive int, qos byte, retained, subscribe bool, timeout time.Duration) {
 
 	cliCfg := pahov5.ClientConfig{
-		ServerUrls:           []*url.URL{brokerURL},
-		KeepAlive:            uint16(keepalive),
-		ConnectUsername:      username,
-		ConnectPassword:      []byte(password),
-		ConnectTimeout:       timeout,
-		ReconnectBackoff:     func(int) time.Duration { return 2 * time.Second },
+		ServerUrls:       []*url.URL{brokerURL},
+		KeepAlive:        uint16(keepalive),
+		ConnectUsername:  username,
+		ConnectPassword:  []byte(password),
+		ConnectTimeout:   timeout,
+		ReconnectBackoff: func(int) time.Duration { return 2 * time.Second },
 		OnConnectionUp: func(cm *pahov5.ConnectionManager, _ *pahov5paho.Connack) {
 			fmt.Println("[mqttprobe] connected ✓ (v5)")
 			if subscribe {

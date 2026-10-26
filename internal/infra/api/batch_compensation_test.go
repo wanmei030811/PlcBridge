@@ -16,10 +16,10 @@ import (
 
 // fakeChannel 实现 protocol.ProtocolChannel。
 type fakeChannel struct {
-	mu      sync.Mutex
-	writes  []fakeWrite
-	failOn  int
-	count   int
+	mu     sync.Mutex
+	writes []fakeWrite
+	failOn int
+	count  int
 }
 
 type fakeWrite struct {
@@ -45,16 +45,18 @@ func (f *fakeChannel) Write(_ context.Context, address string, value any, dataTy
 	return nil
 }
 func (f *fakeChannel) BatchWrite(_ context.Context, _ []protocol.WriteOp) error { return nil }
-func (f *fakeChannel) Connect(_ context.Context) error                         { return nil }
-func (f *fakeChannel) Reconnect(_ context.Context) error                      { return nil }
-func (f *fakeChannel) Disconnect() error                                       { return nil }
-func (f *fakeChannel) HealthCheck(_ context.Context) error                     { return nil }
-func (f *fakeChannel) IsConnected() bool                                       { return true }
-func (f *fakeChannel) ProbeActive(_ context.Context) error                     { return nil }
-func (f *fakeChannel) LastActiveAt() time.Time                                 { return time.Time{} }
-func (f *fakeChannel) LastError() string                                       { return "" }
-func (f *fakeChannel) LastErrorAt() time.Time                                  { return time.Time{} }
-func (f *fakeChannel) Stats() map[string]any                                   { return map[string]any{"connection_state": "Connected", "fake": true} }
+func (f *fakeChannel) Connect(_ context.Context) error                          { return nil }
+func (f *fakeChannel) Reconnect(_ context.Context) error                        { return nil }
+func (f *fakeChannel) Disconnect() error                                        { return nil }
+func (f *fakeChannel) HealthCheck(_ context.Context) error                      { return nil }
+func (f *fakeChannel) IsConnected() bool                                        { return true }
+func (f *fakeChannel) ProbeActive(_ context.Context) error                      { return nil }
+func (f *fakeChannel) LastActiveAt() time.Time                                  { return time.Time{} }
+func (f *fakeChannel) LastError() string                                        { return "" }
+func (f *fakeChannel) LastErrorAt() time.Time                                   { return time.Time{} }
+func (f *fakeChannel) Stats() map[string]any {
+	return map[string]any{"connection_state": "Connected", "fake": true}
+}
 
 type fakeErr struct{ msg string }
 

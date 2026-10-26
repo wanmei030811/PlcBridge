@@ -52,5 +52,6 @@ export interface ChannelsRuntimeResp {
 }
 
 export function getChannelsRuntime() {
-  return apiGet<ChannelsRuntimeResp>('/plcbridge/channels/runtime')
+  // suppressGlobalError：通道列表每 1s 轮询，失败时页面保留旧状态静默重试。
+  return apiGet<ChannelsRuntimeResp>('/plcbridge/channels/runtime', { suppressGlobalError: true })
 }

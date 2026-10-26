@@ -10,6 +10,7 @@ import {
 } from '@/api/system'
 import { ElMessage } from 'element-plus'
 import IconButton from '@/components/IconButton.vue'
+import { useConfigExport } from '@/composables/useConfigExport'
 
 // 控制动作 ID：与后端 /api/v1/process/control 保持一致
 type CtrlAction = 'export_config' | 'reload_config' | 'stop_plcbridge' | 'start_plcbridge' | 'restart_plcbridge-web' | 'start_supervisor' | 'stop_supervisor'
@@ -191,6 +192,11 @@ const onStopPlcbridge   = () => runCtrl('stop_plcbridge')
 const onRestartWeb      = () => runCtrl('restart_plcbridge-web')
 const onStartSupervisor = () => runCtrl('start_supervisor')
 const onStopSupervisor  = () => runCtrl('stop_supervisor')
+
+// === 配置脏状态（顶栏也有同一个按钮，这里复用同一份状态）===
+//
+// dirty = true → 改了配置还没导出 config.json，plcbridge 跑的还是旧配置。
+const { dirty, pendingChanges } = useConfigExport()
 </script>
 
 <template>
@@ -312,10 +318,18 @@ const onStopSupervisor  = () => runCtrl('stop_supervisor')
         </div>
         <div class="control-grid">
           <!-- 2. 导出配置（仅导出 config.json 快照，plcbridge 自动 reload） -->
-          <button class="ctrl-btn ctrl-cyan" :disabled="!!ctrlBusy" @click="onExportConfig">
+          <button
+            class="ctrl-btn ctrl-cyan"
+            :class="{ 'ctrl-cyan-dirty': dirty }"
+            :disabled="!!ctrlBusy"
+            @click="onExportConfig"
+          >
             <div class="ctrl-icon">💾</div>
             <div class="ctrl-body">
-              <div class="ctrl-label">导出配置</div>
+              <div class="ctrl-label">
+                导出配置
+                <span v-if="dirty" class="ctrl-dirty-tag">有 {{ pendingChanges || '!' }} 项未导出</span>
+              </div>
               <div class="ctrl-sub">仅写入 config.json，plcbridge 自动热重载</div>
             </div>
           </button>
@@ -995,7 +1009,31 @@ const onStopSupervisor  = () => runCtrl('stop_supervisor')
   font-weight: 600;
   color: #0f172a;
   margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
+/* 有未导出改动时的强调样式 */
+.ctrl-cyan-dirty {
+  border-color: #f59e0b;
+  background: #fffbeb;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.14);
+}
+.ctrl-cyan-dirty .ctrl-label { color: #b45309; }
+.ctrl-dirty-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #f59e0b;
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+:global(.dark) .ctrl-cyan-dirty {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: #f59e0b;
+}
+:global(.dark) .ctrl-cyan-dirty .ctrl-label { color: #fbbf24; }
 .ctrl-sub {
   font-size: 10.5px;
   color: #64748b;

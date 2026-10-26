@@ -1,13 +1,15 @@
 // Package leakcheck 提供 goroutine 泄漏检测（Phase 1.8）。
 //
 // 用法：
-//   func TestSomething(t *testing.T) {
-//       defer leakcheck.Check(t)  // 必须在 defer 中，函数退出时检查
-//       // ... 业务代码
-//   }
+//
+//	func TestSomething(t *testing.T) {
+//	    defer leakcheck.Check(t)  // 必须在 defer 中，函数退出时检查
+//	    // ... 业务代码
+//	}
 //
 // 原理：defer 时对比当前 goroutine 数与函数开始时基线，
-//      若差值 > 容忍阈值（默认 0），则报失败并打印堆栈。
+//
+//	若差值 > 容忍阈值（默认 0），则报失败并打印堆栈。
 //
 // 注意：
 //   - 必须配合 t.Parallel() **不**用（并发测试会污染基线）

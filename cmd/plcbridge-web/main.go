@@ -25,9 +25,25 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/plcbridge/plcbridge/internal/infra/config"
+	"github.com/plcbridge/plcbridge/internal/infra/httpx"
+	_ "github.com/plcbridge/plcbridge/internal/infra/protocol/plugins"
+	"github.com/plcbridge/plcbridge/internal/infra/secconfig"
+	// target/plugins 必须在这里 import（2026-10-22 修复）：
+	//
+	// web 端 createChannel / updateChannel 会调 service.ValidateChannelType，
+	// 它对 role=forward 的通道查 target.Get(type) 校验 type 是否是已注册的 Target。
+	// 之前 web 只 import 了 protocol/plugins，target 注册表是空的
+	// → 任何 role=forward 的通道创建都被判为「type 与 role 不匹配或未知 type」而 400。
+	// 现存 forward 通道是历史数据绕过校验建出来的，所以这个 bug 一直没被发现。
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
+	_ "github.com/plcbridge/plcbridge/internal/infra/target/plugins"
 	"github.com/plcbridge/plcbridge/internal/interface/web"
 )
+
+// httpCfg 是 web 端 HTTP server 的安全配置（超时 / 体限 / 限流）。
+//
+// 抽成包级变量便于测试覆盖。
+var httpCfg = secconfig.DefaultHTTPServerTimeouts()
 
 func main() {
 	configDir := flag.String("config", defaultConfigDirWeb(), "配置文件目录（绝对路径）")
@@ -53,9 +69,9 @@ func main() {
 		}
 		// 先记录"准备 reset"，即使后续失败也能溯源
 		recordPasswordLog(*configDir, "RESET_START", map[string]any{
-			"db_path":         *dbPath,
-			"new_password":    *resetAdminPass,
-			"caller_pid":      os.Getpid(),
+			"db_path":      *dbPath,
+			"new_password": *resetAdminPass,
+			"caller_pid":   os.Getpid(),
 		})
 		if err := resetAdmin(*dbPath, *adminUser, *resetAdminPass); err != nil {
 			recordPasswordLog(*configDir, "RESET_FAILED", map[string]any{"error": err.Error()})
@@ -81,7 +97,23 @@ func main() {
 		*dbPath = filepath.Join(*configDir, "data", "plcbridge.db")
 	}
 
-	// 1. 打开 SQLite
+	// 1. 安全基线：确保 API 密钥可用（fail-fast + 自助生成）。
+	//
+	// web 端用这个密钥签发「服务令牌」去调 core :8082；
+	// 密钥弱 = 任何人都能伪造令牌读写 PLC。
+	//
+	// 优先用环境变量 PLCBRIDGE_API_SECRET；没有则读/生成
+	// <configDir>/api.secret —— 与 core 共享同一个文件，天然同密钥。
+	// 谁先启动谁生成，后启动的读到同一个文件。
+	if err := secconfig.EnsureAPISecretWithFallback(*configDir); err != nil {
+		fmt.Fprintf(os.Stderr, "启动被拒绝: %v\n", err)
+		fmt.Fprintf(os.Stderr, "提示: 可设置环境变量指定密钥（web 与 core 必须是同一个），例如:\n")
+		fmt.Fprintf(os.Stderr, "  $env:PLCBRIDGE_API_SECRET = <至少 %d 字节的随机串>\n", secconfig.MinSecretLen)
+		fmt.Fprintf(os.Stderr, "  或设置 PLCBRIDGE_ALLOW_INSECURE_SECRET=1 仅用于本地开发\n")
+		os.Exit(1)
+	}
+
+	// 2. 打开 SQLite
 	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "mkdir db dir failed: %v\n", err)
 		os.Exit(1)
@@ -157,18 +189,38 @@ func main() {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
+	// 安全基线中间件：安全头 → 限流 → 请求体上限。
+	// 顺序说明：安全头最早（保证错误响应也带得上），限流次之（先挡超量请求）。
+	r.Use(httpx.SecurityHeaders())
+	if rl := httpx.NewRateLimiter(httpCfg.RateLimitRPS, httpCfg.RateLimitBurst); rl != nil {
+		r.Use(rl.Middleware())
+	}
+	r.Use(httpx.BodyLimit(httpCfg.MaxBodyBytes))
 	web.RegisterRoutes(r, db, *configDir, sess)
 
 	srv := &http.Server{
-		Addr:    *addr,
-		Handler: r,
+		Addr:              *addr,
+		Handler:           r,
+		ReadTimeout:       time.Duration(httpCfg.ReadTimeout) * time.Second,
+		WriteTimeout:      time.Duration(httpCfg.WriteTimeout) * time.Second,
+		IdleTimeout:       time.Duration(httpCfg.IdleTimeout) * time.Second,
+		ReadHeaderTimeout: time.Duration(httpCfg.ReadHeaderTimeout) * time.Second,
+		MaxHeaderBytes:    httpCfg.MaxHeaderBytes,
 	}
 
 	httpErrCh := make(chan error, 1)
 	go func() {
-		logging.Info("plcbridge-web 启动").Str("addr", *addr).Send()
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			httpErrCh <- err
+		certFile, keyFile := secconfig.TLSFiles()
+		if certFile != "" && keyFile != "" {
+			logging.Info("plcbridge-web 启动").Str("addr", *addr).Str("tls_cert", certFile).Send()
+			if err := srv.ListenAndServeTLS(certFile, keyFile); err != nil && err != http.ErrServerClosed {
+				httpErrCh <- err
+			}
+		} else {
+			logging.Info("plcbridge-web 启动").Str("addr", *addr).Send()
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				httpErrCh <- err
+			}
 		}
 		close(httpErrCh)
 	}()
@@ -287,10 +339,10 @@ func requestLogger() gin.HandlerFunc {
 // defaultConfigDirWeb 返回配置目录。
 //
 // 优先级（2026-10-12 重新设计）：
-//   1. -config 命令行参数（最高，由 flag.String 兜底）
-//   2. PLCBRIDGE_CONFIG 环境变量
-//   3. /etc/plcbridge（仅 Linux/macOS）
-//   4. %PROGRAMDATA%\plcbridge（仅 Windows，PROGRAMDATA 未设置时降级 C:\ProgramData）
+//  1. -config 命令行参数（最高，由 flag.String 兜底）
+//  2. PLCBRIDGE_CONFIG 环境变量
+//  3. /etc/plcbridge（仅 Linux/macOS）
+//  4. %PROGRAMDATA%\plcbridge（仅 Windows，PROGRAMDATA 未设置时降级 C:\ProgramData）
 //
 // 历史：2026-10-12 上午曾写死 PROGRAMDATA，但用户实际工作流是显式 env 指向
 // F:\Project\PlcBridge\config（项目级配置，方便 git 同步 + 备份）。重写支持 env 优先。

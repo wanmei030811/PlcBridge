@@ -1,18 +1,20 @@
 // bench —— plcbridge 端到端压测工具。
 //
 // 用法：
-//   go run ./cmd/bench -plc 200 -points-per-plc 350 -interval 1000 -write-rps 100 -duration 30m
+//
+//	go run ./cmd/bench -plc 200 -points-per-plc 350 -interval 1000 -write-rps 100 -duration 30m
 //
 // 步骤：
-//   1. 启动 N 个 mock Modbus TCP server（每台独占端口）
-//   2. 构造 in-memory config.json（200 PLC × 350 点位 = 7 万点，1Hz 采集）
-//   3. 启动 plcbridge 的 collectPool/forwardPool/writePool/configPool
-//   4. 注册 sink target plugin，forward 队列里消费它
-//   5. 并发 goroutine 持续打 /api/v1/write 写 mock PLC
-//   6. sampler 每 5s 抓 runtime/CSV
+//  1. 启动 N 个 mock Modbus TCP server（每台独占端口）
+//  2. 构造 in-memory config.json（200 PLC × 350 点位 = 7 万点，1Hz 采集）
+//  3. 启动 plcbridge 的 collectPool/forwardPool/writePool/configPool
+//  4. 注册 sink target plugin，forward 队列里消费它
+//  5. 并发 goroutine 持续打 /api/v1/write 写 mock PLC
+//  6. sampler 每 5s 抓 runtime/CSV
 //
 // 退出：
-//   Ctrl+C → 优雅停机，写最后一帧 CSV，输出总结。
+//
+//	Ctrl+C → 优雅停机，写最后一帧 CSV，输出总结。
 package main
 
 import (
@@ -37,7 +39,6 @@ import (
 	"github.com/plcbridge/plcbridge/internal/infra/config"
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
 	"github.com/plcbridge/plcbridge/internal/infra/pool"
-	"github.com/plcbridge/plcbridge/internal/infra/protocol"
 	"github.com/plcbridge/plcbridge/internal/infra/target"
 	"github.com/plcbridge/plcbridge/internal/metrics"
 	"github.com/plcbridge/plcbridge/internal/platform"
@@ -45,15 +46,15 @@ import (
 
 func main() {
 	var (
-		plcCount       = flag.Int("plc", 200, "mock PLC 数量")
-		pointsPerPLC   = flag.Int("points-per-plc", 350, "每 PLC 点位数")
-		basePort       = flag.Int("base-port", 25000, "mock PLC 起始端口")
-		collectMs      = flag.Int("interval", 1000, "采集周期 ms")
-		writeRPS       = flag.Int("write-rps", 100, "回写并发 TPS（0=禁用）")
-		writeDuration  = flag.Duration("duration", 30*time.Minute, "压测时长")
-		csvPath        = flag.String("csv", "bench.csv", "输出 CSV 路径")
-		warmupSec      = flag.Int("warmup", 30, "预热秒数（前 N 秒不计入 P99）")
-		apiAddr        = flag.String("api", ":28082", "plcbridge API 监听地址")
+		plcCount      = flag.Int("plc", 200, "mock PLC 数量")
+		pointsPerPLC  = flag.Int("points-per-plc", 350, "每 PLC 点位数")
+		basePort      = flag.Int("base-port", 25000, "mock PLC 起始端口")
+		collectMs     = flag.Int("interval", 1000, "采集周期 ms")
+		writeRPS      = flag.Int("write-rps", 100, "回写并发 TPS（0=禁用）")
+		writeDuration = flag.Duration("duration", 30*time.Minute, "压测时长")
+		csvPath       = flag.String("csv", "bench.csv", "输出 CSV 路径")
+		warmupSec     = flag.Int("warmup", 30, "预热秒数（前 N 秒不计入 P99）")
+		apiAddr       = flag.String("api", ":28082", "plcbridge API 监听地址")
 	)
 	flag.Parse()
 
@@ -91,11 +92,10 @@ func main() {
 	logging.Info("config 已注入内存").Int("version", cfg.Version).Send()
 
 	// 3. 注册 protocol + 自定义 sink target
-	protocol.MustRegisterDefaults()
+	// Plan2 主题 A 3.2：MVP 内置协议已由 plugin 文件 init() 自注册；只需注册自定义 sink。
 	sinkStats := &bench.SinkStats{}
 	sinkPlugin := bench.NewSinkPlugin(sinkStats)
 	target.MustRegister(sinkPlugin)
-	target.MustRegisterDefaults() // 同时注册 mqtt/influxdb 以兼容 cfg
 	logging.Info("已注册 plugins").Send()
 
 	// 4. metrics

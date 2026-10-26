@@ -4,9 +4,9 @@
 // + Config 聚合根持有完整配置快照。
 //
 // 设计原则：
-//   1. 纯数据结构，无业务逻辑，不引用任何 internal 包
-//   2. 与 config.json JSON Schema 严格对齐
-//   3. 与 Web 后台 SQLite schema 严格对齐（§7.7）
+//  1. 纯数据结构，无业务逻辑，不引用任何 internal 包
+//  2. 与 config.json JSON Schema 严格对齐
+//  3. 与 Web 后台 SQLite schema 严格对齐（§7.7）
 package platform
 
 import "encoding/json"
@@ -15,9 +15,9 @@ import "encoding/json"
 //
 // role 决定是采集还是转发（collect / forward）。同一 Channel 不能同时承担两种角色。
 type Channel struct {
-	ChannelBizID string `json:"channel_biz_id"`
-	Role         string `json:"role"` // "collect" | "forward"
-	Type         string `json:"type"` // "s7" | "modbus_tcp" | "opcua" | "mqtt" | "influxdb"
+	ChannelBizID string          `json:"channel_biz_id"`
+	Role         string          `json:"role"` // "collect" | "forward"
+	Type         string          `json:"type"` // "s7" | "modbus_tcp" | "opcua" | "mqtt" | "influxdb"
 	Address      string          `json:"address"`
 	Config       json.RawMessage `json:"config,omitempty"` // 协议私有参数（JSON Schema 驱动 UI，§9.1）
 
@@ -36,9 +36,9 @@ type Channel struct {
 //
 // 一个 Device 可有多种协议接入（多个 Source），通过 channel_biz_id 引用 collect Channel。
 type Device struct {
-	DeviceBizID string   `json:"device_biz_id"`
-	Name        string   `json:"name"`
-	Enabled     bool     `json:"enabled"`
+	DeviceBizID string    `json:"device_biz_id"`
+	Name        string    `json:"name"`
+	Enabled     bool      `json:"enabled"`
 	Sources     []*Source `json:"sources"`
 	Targets     []*Target `json:"targets"`
 }
@@ -48,12 +48,12 @@ type Device struct {
 // Source 1:1 引用 collect Channel（一个 Source 用一个采集连接）；
 // 多个 Source 可共享同一 collect Channel（Channel 内部按连接复用）。
 type Source struct {
-	SourceBizID       string  `json:"source_biz_id"`
-	ChannelBizID      string  `json:"channel_biz_id"`
-	CollectEnabled    bool    `json:"collect_enabled"`
-	WriteEnabled      bool    `json:"write_enabled"`
-	CollectIntervalMs int     `json:"collect_interval_ms"` // 默认 1000
-	TimeoutMs         int     `json:"timeout_ms,omitempty"`
+	SourceBizID       string   `json:"source_biz_id"`
+	ChannelBizID      string   `json:"channel_biz_id"`
+	CollectEnabled    bool     `json:"collect_enabled"`
+	WriteEnabled      bool     `json:"write_enabled"`
+	CollectIntervalMs int      `json:"collect_interval_ms"` // 默认 1000
+	TimeoutMs         int      `json:"timeout_ms,omitempty"`
 	Points            []*Point `json:"points"`
 }
 
@@ -63,8 +63,8 @@ type Source struct {
 type Point struct {
 	PointBizID     string `json:"point_biz_id"`
 	Name           string `json:"name"`
-	Address        string `json:"address"`         // 设备侧地址，如 "DB1.DBD0"
-	DataType       string `json:"data_type"`       // bool / int16 / uint16 / int32 / uint32 / float32 / float64 / string
+	Address        string `json:"address"`   // 设备侧地址，如 "DB1.DBD0"
+	DataType       string `json:"data_type"` // bool / int16 / uint16 / int32 / uint32 / float32 / float64 / string
 	CollectEnabled bool   `json:"collect_enabled"`
 	WriteEnabled   bool   `json:"write_enabled"`
 	// StringLength 仅 data_type=="string" 时使用：S7 STRING layout 字符数 N（S7 header 4 字节 + N 字节 = 4+N 总长）。
@@ -79,8 +79,8 @@ type Point struct {
 type Target struct {
 	TargetBizID         string   `json:"target_biz_id"`
 	ForwardChannelBizID string   `json:"forward_channel_biz_id"`
-	PointBizIDs         []string `json:"point_biz_ids"` // ["*"] 表示所有点位
-	Topic               string   `json:"topic,omitempty"` // 转发到的 MQTT Topic（必填）
+	PointBizIDs         []string `json:"point_biz_ids"`    // ["*"] 表示所有点位
+	Topic               string   `json:"topic,omitempty"`  // 转发到的 MQTT Topic（必填）
 	Format              string   `json:"format,omitempty"` // "json" | "line_protocol" | "raw"
 }
 
@@ -89,7 +89,7 @@ type Target struct {
 // 与 Plan.md §4 / §7 数据模型严格对齐：5 个核心实体（Channel / Device / Source / Point / Target）
 // + Target ↔ Point 关联通过 Target.point_biz_ids 表达（Source 范围由 Point 归属自动推导）。
 type Config struct {
-	Version  int       `json:"version"`
+	Version  int        `json:"version"`
 	Channels []*Channel `json:"channels"`
 	Devices  []*Device  `json:"devices"`
 }

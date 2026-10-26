@@ -50,22 +50,10 @@ func (e *ValidationError) Errors() []error {
 	return out
 }
 
-// validDataTypes 是平台层支持的点位数据类型（§7.5）。
-// 新增类型必须在这里登记。
-var validDataTypes = map[string]bool{
-	"bool":    true,
-	"int8":    true,
-	"int16":   true,
-	"int32":   true,
-	"int64":   true,
-	"uint8":   true,
-	"uint16":  true,
-	"uint32":  true,
-	"uint64":  true,
-	"float32": true,
-	"float64": true,
-	"string":  true,
-}
+// validDataTypes 由 platform.IsValidDataType 单一事实源接管（Plan2 主题 A 3.1 查表化）。
+//
+// 历史：曾在此处硬编码 13 个 case，与 web.isKnownDataType 双份维护，存在漂移风险。
+// 现在：handler CRUD + 启动 config 校验 都走 platform.IsValidDataType，词汇表只一处。
 
 // validChannelRoles 是 channel.role 合法值。
 var validChannelRoles = map[string]bool{
@@ -86,13 +74,13 @@ var validChannelTypes = map[string]bool{
 // Validate 完整校验 platform.Config。
 //
 // 校验项：
-//   1. channel_biz_id 唯一 + 非空 + role/type 合法
-//   2. device_biz_id 唯一 + 非空
-//   3. source_biz_id 在 device 内唯一 + 全局唯一 + channel_biz_id 引用存在
-//   4. target_biz_id 在 device 内唯一 + 全局唯一 + forward_channel_biz_id 引用存在
-//   5. point_biz_id 在 source 内唯一 + 全局唯一 + data_type 合法 + address 非空
-//   6. 跨 device 的 source_biz_id 重复会拒绝
-//   7. target.point_biz_ids 中引用必须真实存在
+//  1. channel_biz_id 唯一 + 非空 + role/type 合法
+//  2. device_biz_id 唯一 + 非空
+//  3. source_biz_id 在 device 内唯一 + 全局唯一 + channel_biz_id 引用存在
+//  4. target_biz_id 在 device 内唯一 + 全局唯一 + forward_channel_biz_id 引用存在
+//  5. point_biz_id 在 source 内唯一 + 全局唯一 + data_type 合法 + address 非空
+//  6. 跨 device 的 source_biz_id 重复会拒绝
+//  7. target.point_biz_ids 中引用必须真实存在
 //
 // 返回 *ValidationError 聚合所有错误。
 func Validate(cfg *platform.Config) error {
@@ -217,7 +205,7 @@ func validatePoints(src *platform.Source, srcLoc string, ve *ValidationError) {
 			ve.Errs = append(ve.Errs, fmt.Errorf("%s point_biz_id 在 source 内重复: %s", pLoc, p.PointBizID))
 		}
 		seenPoint[p.PointBizID] = true
-		if p.DataType != "" && !validDataTypes[p.DataType] {
+		if p.DataType != "" && !platform.IsValidDataType(p.DataType) {
 			ve.Errs = append(ve.Errs, fmt.Errorf("%s data_type 非法: %q", pLoc, p.DataType))
 		}
 		if strings.TrimSpace(p.Address) == "" {

@@ -1,7 +1,8 @@
 // Package forward ?? plcbridge ????????
 //
 // ????
-//   collectPool -> Target.Queue -> forwardPool -> Target.Send (MQTT/InfluxDB)
+//
+//	collectPool -> Target.Queue -> forwardPool -> Target.Send (MQTT/InfluxDB)
 //
 // ?????6.4.3???????? WAL????? + ERROR ?? + Prometheus ???
 //
@@ -10,6 +11,8 @@ package forward
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -28,9 +31,9 @@ type Workers struct {
 	pools  *pool.Pools
 	router *target.Router
 
-	mu      sync.Mutex
-	cache   *clientCache
-	gen     int64 // current cfg generation loaded in cache
+	mu    sync.Mutex
+	cache *clientCache
+	gen   int64 // current cfg generation loaded in cache
 }
 
 // NewWorkers ???? workers?
@@ -41,6 +44,62 @@ func NewWorkers(store *config.Store, pools *pool.Pools, router *target.Router) *
 // Start ???? Target ??? worker?
 func (w *Workers) Start(ctx context.Context) {
 	go w.runSupervisor(ctx)
+	go w.runHealthLoop(ctx)
+}
+
+// targetHealthLoopInterval background target health check interval.
+//
+// Why this loop exists (2026-10-25 fix):
+// Target status (connected / last_error) was only refreshed when something
+// called HealthCheck. In practice that meant:
+//   - The forward queue was empty (upstream PLC down) -> no Send() -> no error
+//     was ever recorded -> InfluxDB "Disconnected" was never noticed.
+//   - The only path that probed the target was the manual "diagnose" action.
+//
+// With this loop the target connection state is refreshed on its own, so the
+// UI shows "abnormal" within seconds of the downstream service going down,
+// and flips back to "online" as soon as the service comes back.
+const targetHealthLoopInterval = 5 * time.Second
+
+// runHealthLoop periodically probes every forward Target client.
+//
+// HealthCheck implementations are cheap (MQTT: check session; InfluxDB: HTTP
+// /ping) and are throttled per client by the protocol layer, so a 5s tick is
+// safe even with many targets.
+//
+// Failures are intentionally NOT logged per tick: a downed InfluxDB would
+// otherwise produce a log line every 5s forever. The error is recorded on the
+// client itself (LastError) and surfaces through the diagnostics API.
+func (w *Workers) runHealthLoop(ctx context.Context) {
+	ticker := time.NewTicker(targetHealthLoopInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.probeTargets(ctx)
+		}
+	}
+}
+
+// probeTargets runs HealthCheck against every cached Target client.
+func (w *Workers) probeTargets(ctx context.Context) {
+	w.mu.Lock()
+	cache := w.cache
+	w.mu.Unlock()
+	if cache == nil {
+		return
+	}
+	for bizID, cli := range cache.snapshot() {
+		if cli == nil {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		_ = cli.HealthCheck(probeCtx)
+		cancel()
+		_ = bizID
+	}
 }
 
 func (w *Workers) runSupervisor(ctx context.Context) {
@@ -92,7 +151,7 @@ func (w *Workers) closeClients() {
 	if cache == nil {
 		return
 	}
-	for bizID, cli := range cache.clients {
+	for bizID, cli := range cache.snapshot() {
 		if closer, ok := cli.(target.TargetCloser); ok {
 			if err := closer.Close(); err != nil {
 				logging.Warn(logging.EventTargetConnectFail).
@@ -220,6 +279,14 @@ func (w *Workers) runForwarder(ctx context.Context, targetBizID string, q *targe
 		case <-ticker.C:
 			flush()
 		default:
+			// 上报队列长度（Prometheus）。
+			//
+			// 为什么在这里埋点：forwarder 是唯一持续消费 target 队列的组件，
+			// 它的轮询循环天然是观察队列长度的最佳位置。
+			// 队列接近打满（>80%）时 alert PlcbridgeTargetQueueNearFull 会触发。
+			if qlen, _, _ := q.Stats(); qlen >= 0 {
+				metrics.TargetQueueLength.WithLabelValues(targetBizID).Set(float64(qlen))
+			}
 			if v, ok := tryDequeue(q); ok {
 				batch = append(batch, v)
 				if len(batch) >= batchSize {
@@ -268,7 +335,8 @@ func (w *Workers) Stop(timeout time.Duration) {
 // 用途：web 仪表盘通道列表（与 collect 通道共用同一份 ChannelSnapshot 形状）。
 //
 // 聚合策略：同一 forward channel 可被多个 target 引用，IsConnected 走 OR（任一 target 连上即视为活）；
-//           last_error / Stats 优先返回"出错"的那个 target（多 target 都错时取最后一个）。
+//
+//	last_error / Stats 优先返回"出错"的那个 target（多 target 都错时取最后一个）。
 //
 // 调用方：api.Server.channelsRuntime 每 1s 调一次。
 func (w *Workers) Snapshot() map[string]protocol.ChannelSnapshot {
@@ -284,7 +352,7 @@ func (w *Workers) Snapshot() map[string]protocol.ChannelSnapshot {
 	agg := map[string]*forwardAggEntry{}
 	for _, dev := range cache.cfg.Devices {
 		for _, tgt := range dev.Targets {
-			cli, ok := cache.clients[tgt.TargetBizID]
+			cli, ok := cache.get(tgt.TargetBizID)
 			if !ok {
 				continue
 			}
@@ -346,11 +414,101 @@ func (w *Workers) Snapshot() map[string]protocol.ChannelSnapshot {
 	return out
 }
 
+// TargetSnapshot 返回所有 Target 的诊断快照 JSON（Plan3 3.4）。
+func (w *Workers) TargetSnapshot() []byte {
+	w.mu.Lock()
+	cache := w.cache
+	w.mu.Unlock()
+	type ts struct {
+		TargetBizID string `json:"target_biz_id"`
+		// Type 是转发协议类型（mqtt / influxdb），来自 Target 所属的 forward Channel。
+		Type string `json:"type"`
+		// Format 是数据序列化格式（json / line_protocol / raw），来自 Target 配置。
+		Format        string         `json:"format"`
+		Connected     bool           `json:"connected"`
+		LastError     string         `json:"last_error"`
+		Stats         map[string]any `json:"stats"`
+		QueueLen      int            `json:"queue_len"`
+		QueueCap      int            `json:"queue_cap"`
+		DroppedTotal  int64          `json:"dropped_total"`
+		EnqueuedTotal int64          `json:"enqueued_total"`
+	}
+	var out []ts
+	if cache != nil {
+		// channelType 查 forward channel 的协议类型。
+		// 为什么需要：Target 只存 forward_channel_biz_id，协议类型声明在 Channel 上。
+		channelType := func(channelBizID string) string {
+			for _, ch := range cache.cfg.Channels {
+				if ch.ChannelBizID == channelBizID {
+					return ch.Type
+				}
+			}
+			return ""
+		}
+		for _, dev := range cache.cfg.Devices {
+			for _, tgt := range dev.Targets {
+				cli, ok := cache.get(tgt.TargetBizID)
+				if !ok {
+					continue
+				}
+				stats := safeTargetStats(cli)
+				q := w.router.Get(tgt.TargetBizID)
+				queueLen, dropped, enqueued := 0, int64(0), int64(0)
+				queueCap := 0
+				if q != nil {
+					l, d, e := q.Stats()
+					queueLen, dropped, enqueued = l, int64(d), int64(e)
+					queueCap = q.Cap()
+				}
+				out = append(out, ts{
+					TargetBizID:   tgt.TargetBizID,
+					Type:          channelType(tgt.ForwardChannelBizID),
+					Format:        tgt.Format,
+					Connected:     cli.IsConnected(),
+					LastError:     cli.LastError(),
+					Stats:         stats,
+					QueueLen:      queueLen,
+					QueueCap:      queueCap,
+					DroppedTotal:  dropped,
+					EnqueuedTotal: enqueued,
+				})
+			}
+		}
+	}
+	data, _ := json.Marshal(map[string]any{"targets": out})
+	return data
+}
+
 type forwardAggEntry struct {
 	protocol string
 	targets  []string
 	clients  []target.TargetClient
 }
+
+// QueryHistory 通过指定 target 查询历史数据（Plan3 3.5）。
+//
+// 只对实现了 target.HistoryQueryer 的 Target 有效（InfluxDB 的 V1 与 V2 都实现了）。
+// 返回 ErrHistoryNotSupported 表示该 target 不支持历史查询。
+func (w *Workers) QueryHistory(ctx context.Context, targetBizID string, q target.HistoryQuery) (any, error) {
+	w.mu.Lock()
+	cache := w.cache
+	w.mu.Unlock()
+	if cache == nil {
+		return nil, ErrHistoryNotSupported
+	}
+	cli, ok := cache.get(targetBizID)
+	if !ok {
+		return nil, ErrHistoryNotSupported
+	}
+	hq, ok := cli.(target.HistoryQueryer)
+	if !ok {
+		return nil, ErrHistoryNotSupported
+	}
+	return hq.QueryHistory(ctx, q)
+}
+
+// ErrHistoryNotSupported 表示该 target 不支持历史数据查询。
+var ErrHistoryNotSupported = errors.New("target does not support history query")
 
 // safeTargetStats 包装 cli.Stats() 防止 panic。
 func safeTargetStats(cli target.TargetClient) map[string]any {
@@ -369,8 +527,16 @@ func safeTargetStats(cli target.TargetClient) map[string]any {
 
 // === clientCache ===
 
+// clientCache 缓存 Target client。
+//
+// 为什么需要锁（2026-10-25 修复）：
+// 后台健康巡检（runHealthLoop → probeTargets）会**并发读** cache.clients，
+// 而 spawnAll 里的 getOrCreate 会**并发写**同一张 map。
+// Go 的 map 并发读写会直接 panic（fatal error: concurrent map read and map write），
+// 现场表现为 plcbridge 进程在配置热重载 + 目标探活同时发生时随机崩溃。
 type clientCache struct {
 	cfg     *platform.Config
+	mu      sync.RWMutex
 	clients map[string]target.TargetClient
 }
 
@@ -378,8 +544,30 @@ func newClientCache(cfg *platform.Config) *clientCache {
 	return &clientCache{cfg: cfg, clients: map[string]target.TargetClient{}}
 }
 
+// snapshot 返回 client 列表的副本（并发安全）。
+func (c *clientCache) snapshot() map[string]target.TargetClient {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make(map[string]target.TargetClient, len(c.clients))
+	for k, v := range c.clients {
+		out[k] = v
+	}
+	return out
+}
+
+// get 返回指定 target 的 client（并发安全）。
+func (c *clientCache) get(targetBizID string) (target.TargetClient, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	cli, ok := c.clients[targetBizID]
+	return cli, ok
+}
+
 func (c *clientCache) getOrCreate(targetBizID string) (target.TargetClient, error) {
-	if cli, ok := c.clients[targetBizID]; ok {
+	c.mu.RLock()
+	cli, ok := c.clients[targetBizID]
+	c.mu.RUnlock()
+	if ok {
 		return cli, nil
 	}
 
@@ -416,7 +604,9 @@ func (c *clientCache) getOrCreate(targetBizID string) (target.TargetClient, erro
 				Str("channel", channel.ChannelBizID).
 				Str("type", channel.Type).
 				Send()
+			c.mu.Lock()
 			c.clients[targetBizID] = cli
+			c.mu.Unlock()
 			return cli, nil
 		}
 	}

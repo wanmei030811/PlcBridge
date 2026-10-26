@@ -29,7 +29,11 @@ param(
     [string]$TaskName = 'PlcBridgeSupervisor',
 
     # 高级：自定义仓库根（默认当前脚本上一级）
-    [string]$Root = ''
+    [string]$Root = '',
+
+    # 高级：自定义配置目录（默认 <Root>\config）。
+    # 必须与 supervisor.ps1 用的 ConfigDir 一致，否则状态文件读不到。
+    [string]$ConfigDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -52,7 +56,23 @@ function Assert-Admin {
 }
 
 function Get-StatePath {
-    Join-Path $Root 'runtime\supervisor.state.json'
+    # runtime 目录必须与 supervisor / web 端一致。
+    #
+    # 历史不一致（2026-10-26 修复）：本脚本用 $Root\runtime\，
+    # 而 supervisor.ps1 与 web 端 process_control.go 都用 <ConfigDir>\runtime\。
+    # 结果是 -Status 永远读不到 supervisor 写的 state.json，
+    # 控制台的 "启动/停止 supervisor" 按钮状态也显示不对。
+    #
+    # ConfigDir 解析规则与 supervisor.ps1 一致：
+    #   1. -ConfigDir 参数
+    #   2. 环境变量 PLCBRIDGE_CONFIG_DIR
+    #   3. 兜底 <Root>\config
+    $cfg = $ConfigDir
+    if (-not $cfg) {
+        $envCfg = $env:PLCBRIDGE_CONFIG_DIR
+        if ($envCfg) { $cfg = $envCfg } else { $cfg = Join-Path $Root 'config' }
+    }
+    Join-Path $cfg 'runtime\supervisor.state.json'
 }
 
 function Out-Line {
@@ -105,7 +125,10 @@ function Install-Service {
     Uninstall-Service -Quiet
 
     $psExe = (Get-Command powershell.exe).Source
-    $arg   = "-NoProfile -ExecutionPolicy Bypass -File `"$SupervisorScript`" -Root `"$Root`" -Daemon"
+    # 必须把 -ConfigDir 传给 supervisor：否则 supervisor 用默认 <Root>\config，
+    # 而 state.json / control.pending.json 就和本脚本 / web 端读的不是同一个目录。
+    $cfgDir = if ($ConfigDir) { $ConfigDir } elseif ($env:PLCBRIDGE_CONFIG_DIR) { $env:PLCBRIDGE_CONFIG_DIR } else { Join-Path $Root 'config' }
+    $arg   = "-NoProfile -ExecutionPolicy Bypass -File `"$SupervisorScript`" -Root `"$Root`" -ConfigDir `"$cfgDir`" -Daemon"
 
     $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
@@ -260,7 +283,7 @@ function Start-Service {
 function Stop-Service {
     Out-Line "[stop] stopping task $TaskName ..." 'Cyan'
     # first send stop_supervisor for clean shutdown
-    $ctrlPath = Join-Path $Root 'runtime\control.pending.json'
+    $ctrlPath = Join-Path (Split-Path (Get-StatePath) -Parent) 'control.pending.json'
     $ctrlDir  = Split-Path $ctrlPath
     if (-not (Test-Path $ctrlDir)) { New-Item -ItemType Directory -Force -Path $ctrlDir | Out-Null }
     try {
@@ -331,8 +354,21 @@ function Status-Service {
 
     $s = Get-ServiceState
     $stateLine = '[state]      status=' + $s.status + '  web=' + $s.web_pid + '  core=' + $s.core_pid + '  msg=' + $s.message
-    if ($s.status -eq 'running') {
+    # state.json 由 supervisor 定期刷新（几秒一次）。
+    # 如果文件太久没更新，说明 supervisor 已经死了 —— 状态是陈旧的，
+    # 不能按 "running" 显示，否则会误导运维以为服务还活着。
+    $stateAge = $null
+    try {
+        $stateFile = Get-StatePath
+        if (Test-Path $stateFile) {
+            $stateAge = ((Get-Date) - (Get-Item $stateFile).LastWriteTime).TotalSeconds
+        }
+    } catch {}
+    $stale = ($null -ne $stateAge -and $stateAge -gt 30)
+    if ($s.status -eq 'running' -and -not $stale) {
         Out-Line $stateLine 'Green'
+    } elseif ($stale) {
+        Out-Line ($stateLine + '  [STALE ' + [int]$stateAge + 's ago - supervisor 已失联]') 'Yellow'
     } else {
         Out-Line $stateLine 'Yellow'
     }
@@ -347,14 +383,18 @@ function Status-Service {
         } catch {}
         return $false
     }
-    $webPort  = _testPort 8080
-    $corePort = _testPort 9091
+    $webPort   = _testPort 8080
+    $corePort  = _testPort 8082   # core 的 API 端口（采集通道 / 点位 / 回写）
+    $metricPort = _testPort 9091  # core 的 Prometheus metrics 端口
     $webText  = if ($webPort)  { 'listening' } else { 'NOT listening' }
     $coreText = if ($corePort) { 'listening' } else { 'NOT listening' }
+    $metricText = if ($metricPort) { 'listening' } else { 'NOT listening' }
     $webColor  = if ($webPort)  { 'Green' } else { 'Red' }
     $coreColor = if ($corePort) { 'Green' } else { 'Red' }
+    $metricColor = if ($metricPort) { 'Green' } else { 'DarkGray' }
     Out-Line ('[port 8080] plcbridge-web   ' + $webText) $webColor
-    Out-Line ('[port 9091] plcbridge       ' + $coreText) $coreColor
+    Out-Line ('[port 8082] plcbridge api   ' + $coreText) $coreColor
+    Out-Line ('[port 9091] plcbridge prom  ' + $metricText) $metricColor
 
     Out-Line ""
     Out-Line ('logs: ' + $Root + '\logs\') 'DarkGray'

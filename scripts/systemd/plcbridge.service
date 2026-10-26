@@ -13,6 +13,25 @@ ExecStart=/opt/plcbridge/bin/plcbridge --config /etc/plcbridge
 Restart=always
 RestartSec=5
 
+# === API 密钥 ===
+#
+# plcbridge 与 plcbridge-web 必须共享同一个 HMAC 签名密钥，
+# 否则 web → core 的内部调用全部 401。
+#
+# 密钥来源（按优先级）：
+#   1. 环境变量 PLCBRIDGE_API_SECRET
+#   2. 配置文件 /etc/plcbridge/api.secret
+#
+# 两个 unit 都用 --config /etc/plcbridge → 指向同一个目录 → 天然共享同一份密钥文件。
+# 首次启动时 whoever 先起来谁生成（O_EXCL 独占创建，原子安全）。
+#
+# ⚠️ 不要把密钥写进本 unit 文件 —— unit 文件全局可读。
+#    如需用环境变量注入，请用 EnvironmentFile（权限 0600）：
+#      echo "PLCBRIDGE_API_SECRET=<随机串>" > /etc/plcbridge/api.env
+#      chmod 600 /etc/plcbridge/api.env
+#      systemctl edit plcbridge   # 加一行 EnvironmentFile=/etc/plcbridge/api.env
+EnvironmentFile=-/etc/plcbridge/api.env
+
 # 优雅退出：SIGTERM 触发 shutdown，5 秒后强制 kill
 KillMode=mixed
 KillSignal=SIGTERM

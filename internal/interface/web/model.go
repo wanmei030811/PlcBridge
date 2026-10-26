@@ -10,20 +10,20 @@ import (
 
 // ChannelDTO 是 REST API 用 Channel 数据传输对象。
 type ChannelDTO struct {
-	ID                     int64            `json:"id"`
-	ChannelBizID           string           `json:"channel_biz_id"`
-	Role                   string           `json:"role"` // "collect" | "forward"
-	Type                   string           `json:"type"` // 协议类型 s7 / opcua / mqtt / influxdb / modbus ...
-	Address                string           `json:"address"`
-	Config                 string           `json:"config"`
-	HeartbeatAddress       string           `json:"heartbeat_address"`
-	HeartbeatMaxIntervalMs int              `json:"heartbeat_max_interval_ms"`
-	HeartbeatEnabled       bool             `json:"heartbeat_enabled"`
-	HeartbeatDebounceMs    int              `json:"heartbeat_debounce_ms"`
-	QueueSize              int              `json:"queue_size"`
-	TimeoutMs              int              `json:"timeout_ms"`
-	CreatedAtMs            int64            `json:"-"`
-	UpdatedAtMs            int64            `json:"-"`
+	ID                     int64             `json:"id"`
+	ChannelBizID           string            `json:"channel_biz_id"`
+	Role                   string            `json:"role"` // "collect" | "forward"
+	Type                   string            `json:"type"` // 协议类型 s7 / opcua / mqtt / influxdb / modbus ...
+	Address                string            `json:"address"`
+	Config                 string            `json:"config"`
+	HeartbeatAddress       string            `json:"heartbeat_address"`
+	HeartbeatMaxIntervalMs int               `json:"heartbeat_max_interval_ms"`
+	HeartbeatEnabled       bool              `json:"heartbeat_enabled"`
+	HeartbeatDebounceMs    int               `json:"heartbeat_debounce_ms"`
+	QueueSize              int               `json:"queue_size"`
+	TimeoutMs              int               `json:"timeout_ms"`
+	CreatedAtMs            int64             `json:"-"`
+	UpdatedAtMs            int64             `json:"-"`
 	CreatedAt              timefmt.BJTMillis `json:"created_at"`
 	UpdatedAt              timefmt.BJTMillis `json:"updated_at"`
 }
@@ -51,8 +51,8 @@ type SourceDTO struct {
 	ChannelBizID      string            `json:"channel_biz_id"`
 	CollectEnabled    bool              `json:"collect_enabled"`
 	WriteEnabled      bool              `json:"write_enabled"`
-	CollectIntervalMs int              `json:"collect_interval_ms"`
-	TimeoutMs         int              `json:"timeout_ms"`
+	CollectIntervalMs int               `json:"collect_interval_ms"`
+	TimeoutMs         int               `json:"timeout_ms"`
 	CreatedAtMs       int64             `json:"-"`
 	UpdatedAtMs       int64             `json:"-"`
 	CreatedAt         timefmt.BJTMillis `json:"created_at"`
@@ -95,12 +95,12 @@ type TargetDTO struct {
 
 // TokenDTO 内部 store 类型（包含明文 token），不应序列化给客户端
 type TokenDTO struct {
-	ID          int64             `json:"-"`
-	Token       string            `json:"-"`
-	Name        string            `json:"-"`
-	CreatedAtMs int64             `json:"-"`
-	RevokedMs   int64             `json:"-"`
-	CreatedAt   timefmt.BJTMillis `json:"-"`
+	ID          int64              `json:"-"`
+	Token       string             `json:"-"`
+	Name        string             `json:"-"`
+	CreatedAtMs int64              `json:"-"`
+	RevokedMs   int64              `json:"-"`
+	CreatedAt   timefmt.BJTMillis  `json:"-"`
 	RevokedAt   *timefmt.BJTMillis `json:"-"`
 }
 

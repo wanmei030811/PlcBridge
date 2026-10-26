@@ -23,7 +23,7 @@ func TestAuditNoBackgroundInBusinessPaths(t *testing.T) {
 	// 白名单：明确允许 context.Background 的文件
 	allowed := map[string]bool{
 		"internal/infra/protocol/registry.go": true, // Snapshot 路径
-		"internal/interface/web/web.go":      true, // 启动 PRAGMA
+		"internal/interface/web/web.go":       true, // 启动 PRAGMA
 	}
 
 	suspicious := map[string][]string{}

@@ -1,0 +1,1147 @@
+openapi: 3.0.3
+info:
+  title: plcbridge Web API
+  version: 1.2.0
+  description: |
+    plcbridge-web HTTP API（Plan2 主题 F 8.3）。
+
+    ## 错误响应统一格式
+
+    业务校验错误（4xx）返回 `{code, msg, [i18n_key]}`：
+    ```json
+    { "code": "channel_not_found", "msg": "channel 不存在" }
+    ```
+
+    ## 鉴权
+
+    除 `POST /api/v1/auth/login` 外，所有 `/api/v1/*` 路由需要 session cookie。
+    未登录返回 401 `{code: "unauthorized", msg: "未登录"}`。
+
+    ## 协议 / Target 元信息
+
+    `GET /api/v1/protocols`（无需鉴权）返回当前已注册的协议 / Target 列表。
+    数据源：plcbridge 主进程 :8082/api/v1/protocols（web 端代理 + 5s 缓存）。
+servers:
+  - url: http://localhost:8080
+    description: plcbridge-web（开发）
+
+paths:
+  /api/v1/health:
+    get:
+      summary: 存活探针（liveness）
+      tags: [health]
+      description: >
+        公开端点（无需登录），供仪表盘心跳与 K8s livenessProbe 使用。
+        永远返回 200 —— 存活探针不应因为依赖抖动而失败。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  db: { type: string, description: 数据库探测结果 }
+                  process:
+                    type: object
+                    description: 进程运行时信息
+                    properties:
+                      pid: { type: integer, format: int64 }
+                      started_at_ms: { type: integer, format: int64 }
+                      uptime_ms: { type: integer, format: int64 }
+                      rss_bytes: { type: integer, format: int64 }
+                      num_goroutine: { type: integer }
+
+  /api/v1/health/ready:
+    get:
+      summary: 就绪探针（readiness）
+      tags: [health]
+      description: >
+        公开端点（无需登录），供 K8s readinessProbe / 外部负载均衡使用。
+        与 /api/v1/health 的区别：本端点受依赖（数据库）影响，
+        依赖不可用时返回 503，表示"暂时不能接流量"。
+      responses:
+        '200': { description: 依赖就绪 }
+        '503': { description: 依赖不可用（如数据库锁） }
+
+  /api/v1/auth/login:
+    post:
+      summary: 登录
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string }
+                password: { type: string, format: password }
+      responses:
+        '200':
+          description: 登录成功，写 Set-Cookie
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/auth/logout:
+    post:
+      summary: 注销
+      tags: [auth]
+      responses:
+        '200':
+          description: 注销成功
+
+  /api/v1/auth/me:
+    get:
+      summary: 当前登录用户
+      tags: [auth]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  username: { type: string }
+
+  /api/v1/auth/change-password:
+    post:
+      summary: 修改密码（需登录）
+      tags: [auth]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [old_password, new_password]
+              properties:
+                old_password: { type: string, format: password }
+                new_password: { type: string, format: password, minLength: 8 }
+      responses:
+        '200': { description: 修改成功 }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/protocols:
+    get:
+      summary: 协议 / Target 元信息（公开）
+      tags: [meta]
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  collect:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProtocolInfo' }
+                  forward:
+                    type: array
+                    items: { $ref: '#/components/schemas/ProtocolInfo' }
+
+  /api/v1/channels:
+    get:
+      summary: 列出所有 channel
+      tags: [channels]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Channel' }
+    post:
+      summary: 创建 channel
+      tags: [channels]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Channel' }
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/channels/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      summary: 获取单个 channel
+      tags: [channels]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      summary: 更新 channel
+      tags: [channels]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Channel' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      summary: 删除 channel（被引用时 409）
+      tags: [channels]
+      responses:
+        '200': { description: 删除成功 }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/devices:
+    get: { tags: [devices], summary: 列出所有 device, responses: { '200': { description: OK } } }
+    post: { tags: [devices], summary: 创建 device, responses: { '201': { description: OK }, '400': { $ref: '#/components/responses/BadRequest' }, '409': { $ref: '#/components/responses/Conflict' } } }
+
+  /api/v1/devices/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get: { tags: [devices], summary: 获取 device (含嵌套 sources/points/targets), responses: { '200': { description: OK } } }
+    put: { tags: [devices], summary: 更新 device, responses: { '200': { description: OK }, '404': { $ref: '#/components/responses/NotFound' } } }
+    delete: { tags: [devices], summary: 删除 device (CASCADE), responses: { '200': { description: OK } } }
+
+  /api/v1/devices/{id}/clone:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    post:
+      tags: [devices]
+      summary: 克隆设备（Plan3 3.7）
+      description: >
+        深拷贝该 Device 及其全部 Source / Point / Target。
+        Source / Point / Target 的 biz_id 会加上 `biz_id_prefix` 前缀以保证唯一性；
+        Channel 不拷贝（复用现有 Channel）。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_device_biz_id]
+              properties:
+                new_device_biz_id: { type: string, description: 新设备的业务 ID（必须唯一） }
+                new_device_name: { type: string, description: 新设备名称（可选） }
+                biz_id_prefix: { type: string, default: clone_, description: 克隆出的 Source/Point/Target biz_id 前缀 }
+      responses:
+        '201':
+          description: 克隆成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_id: { type: integer, format: int64 }
+                  device_biz_id: { type: string }
+                  sources: { type: integer, description: 克隆出的 Source 数量 }
+                  points: { type: integer, description: 克隆出的 Point 数量 }
+                  targets: { type: integer, description: 克隆出的 Target 数量 }
+                  prefix_applied: { type: string, description: 实际使用的 biz_id 前缀 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/sources:
+    get: { tags: [sources], summary: 列出所有 source, responses: { '200': { description: OK } } }
+    post: { tags: [sources], summary: 创建 source, responses: { '201': { description: OK }, '400': { $ref: '#/components/responses/BadRequest' }, '404': { $ref: '#/components/responses/NotFound' } } }
+
+  /api/v1/sources/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get: { tags: [sources], summary: 获取 source, responses: { '200': { description: OK } } }
+    put: { tags: [sources], summary: 更新 source, responses: { '200': { description: OK } } }
+    delete: { tags: [sources], summary: 删除 source (CASCADE 清 points), responses: { '200': { description: OK } } }
+
+  /api/v1/sources/{id}/points:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get: { tags: [sources], summary: 列出 source 下所有 point, responses: { '200': { description: OK } } }
+
+  /api/v1/points:
+    get: { tags: [points], summary: 列出所有 point, responses: { '200': { description: OK } } }
+    post: { tags: [points], summary: 创建 point, responses: { '201': { description: OK }, '400': { $ref: '#/components/responses/BadRequest' } } }
+
+  /api/v1/points/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get: { tags: [points], summary: 获取 point, responses: { '200': { description: OK } } }
+    put: { tags: [points], summary: 更新 point, responses: { '200': { description: OK } } }
+    delete: { tags: [points], summary: 删除 point, responses: { '200': { description: OK } } }
+
+  /api/v1/points/import:
+    post:
+      tags: [points]
+      summary: 批量导入点位 CSV（Plan3 3.1）
+      description: >
+        从 CSV 批量导入点位。首行必须是表头，列顺序不敏感，缺列用默认值：
+
+        ```
+        point_biz_id,name,address,data_type,collect_enabled,write_enabled,string_length
+        p_001,温度,DB1.DBD0,float32,true,false,0
+        ```
+
+        导入在**单事务**内执行：任一行失败 → 整体回滚；导入前自动创建配置快照。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [source_biz_id]
+              properties:
+                source_biz_id: { type: string, description: 目标 Source 的业务 ID }
+                file: { type: string, format: binary, description: CSV 文件 }
+          application/json:
+            schema:
+              type: object
+              required: [source_biz_id, content]
+              properties:
+                source_biz_id: { type: string }
+                content: { type: string, description: CSV 文本内容 }
+      responses:
+        '200':
+          description: 导入结果
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  imported: { type: integer, description: 成功导入条数 }
+                  failed: { type: integer, description: 失败条数 }
+                  skipped: { type: integer, description: 跳过条数（biz_id 已存在等） }
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        row: { type: integer, description: CSV 行号（1-based，含表头行） }
+                        field: { type: string, description: 出错字段名（空 = 整行） }
+                        message: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/points/export:
+    get:
+      tags: [points]
+      summary: 导出点位为 CSV（Plan3 3.1）
+      description: 按 source / device / channel 过滤，至少要给一个过滤条件。
+      parameters:
+        - in: query
+          name: source_biz_id
+          schema: { type: string }
+          description: 按 Source 过滤
+        - in: query
+          name: device_biz_id
+          schema: { type: string }
+          description: 按 Device 过滤
+        - in: query
+          name: channel_biz_id
+          schema: { type: string }
+          description: 按 Channel 过滤
+      responses:
+        '200':
+          description: CSV 文件流
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/plcbridge/channels/runtime:
+    get:
+      tags: [channels]
+      summary: 所有 Channel 的运行时连接状态（Plan3 3.2 / 3.4，web 端代理）
+      description: >
+        返回每个 Channel 的连接状态、最近错误、最近活动时间与协议特定统计。
+        数据源：plcbridge 主进程 :8082/api/v1/channels/runtime（web 端代理 + 300ms 缓存）。
+        注意：这与核心进程自己的 /api/v1/channels/runtime 是同一份数据，
+        web 端多一层代理是为了让前端不必直接连核心进程端口。
+      responses:
+        '200': { $ref: '#/components/responses/ChannelsRuntime' }
+        '503': { description: plcbridge 主进程未运行 }
+
+  /api/v1/channels/runtime:
+    get:
+      tags: [channels]
+      summary: 所有 Channel 的运行时连接状态（Plan3 3.2 / 3.4，核心进程直连）
+      description: >
+        与 /api/v1/plcbridge/channels/runtime 同一份数据。
+        区别：这个路径由 plcbridge 主进程（:8082）自己提供，不需要经过 web 端代理，
+        因此不受 web 进程存活状态影响（适合部署在 web 之外的监控采集）。
+      responses:
+        '200': { $ref: '#/components/responses/ChannelsRuntime' }
+        '503': { description: plcbridge 主进程未运行 }
+
+  /api/v1/targets:
+    get: { tags: [targets], summary: 列出所有 target, responses: { '200': { description: OK } } }
+    post: { tags: [targets], summary: 创建 target, responses: { '201': { description: OK }, '400': { $ref: '#/components/responses/BadRequest' } } }
+
+  /api/v1/sources/{biz_id}/values:
+    parameters:
+      - in: path
+        name: biz_id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [sources]
+      summary: 实时点位值缓存（Plan3 3.2）
+      description: >
+        返回 collect.Workers 内存中的最近一次采集值 + 该 Source 的采集健康度。
+        注意：采集失败时 values 里保留最后一次成功的旧值（不覆盖），
+        必须结合 health 判断这个值有多新 —— status=error 表示 values 是旧值。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  source_biz_id: { type: string }
+                  updated_at: { type: integer, format: int64 }
+                  health: { $ref: '#/components/schemas/SourceHealth' }
+                  values:
+                    type: object
+                    additionalProperties:
+                      type: object
+                      properties:
+                        point_biz_id: { type: string }
+                        address: { type: string }
+                        value: {}
+                        quality: { type: string }
+                        timestamp: { type: integer, format: int64 }
+        '503': { description: 采集服务未运行 }
+
+  /api/v1/devices/{biz_id}/values:
+    parameters:
+      - in: path
+        name: biz_id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [devices]
+      summary: 设备级实时点位值聚合（Plan3 3.2）
+      description: >
+        一次返回该设备下全部 Source 的实时值与健康度，避免前端并发请求 N 次单 Source 接口。
+        health 取最差的那个 Source 的状态；error_count 是处于 error 状态的 Source 数量。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_biz_id: { type: string }
+                  updated_at: { type: integer, format: int64 }
+                  source_count: { type: integer }
+                  error_count: { type: integer }
+                  exists:
+                    type: boolean
+                    description: 该 device_biz_id 在当前配置中是否存在（false 时 sources 为空）
+                  health: { $ref: '#/components/schemas/SourceHealth' }
+                  sources:
+                    type: object
+                    description: key = source_biz_id
+                    additionalProperties:
+                      type: object
+                      properties:
+                        source_biz_id: { type: string }
+                        updated_at: { type: integer, format: int64 }
+                        health: { $ref: '#/components/schemas/SourceHealth' }
+                        values:
+                          type: object
+                          additionalProperties:
+                            type: object
+                            properties:
+                              point_biz_id: { type: string }
+                              address: { type: string }
+                              value: {}
+                              quality: { type: string }
+                              timestamp: { type: integer, format: int64 }
+        '503': { description: 采集服务未运行 }
+
+  /api/v1/targets/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    get: { tags: [targets], summary: 获取 target, responses: { '200': { description: OK } } }
+    put: { tags: [targets], summary: 更新 target, responses: { '200': { description: OK } } }
+    delete: { tags: [targets], summary: 删除 target, responses: { '200': { description: OK } } }
+
+  /api/v1/targets/{id}/points:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    put:
+      tags: [targets]
+      summary: 替换 target 关联的 points
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                point_biz_ids:
+                  type: array
+                  items: { type: string }
+      responses:
+        '200': { description: OK }
+
+  /api/v1/tokens:
+    get: { tags: [tokens], summary: 列出所有 token, responses: { '200': { description: OK } } }
+    post:
+      tags: [tokens]
+      summary: 创建 token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        '201': { description: 创建成功, 返回明文 token (仅此一次) }
+
+  /api/v1/tokens/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: integer, format: int64 } }
+    delete: { tags: [tokens], summary: 撤销 token, responses: { '200': { description: OK } } }
+
+  /api/v1/dashboard:
+    get: { tags: [dashboard], summary: 仪表盘聚合, responses: { '200': { description: OK } } }
+
+  /api/v1/snapshot:
+    post:
+      tags: [snapshot]
+      summary: 导出 config.json 快照
+      responses:
+        '200': { description: 导出成功, 返回文件路径 }
+
+  /api/v1/config/status:
+    get:
+      tags: [config]
+      summary: 配置脏状态（数据库配置 vs 已导出的 config.json）
+      description: |
+        前端顶栏「导出配置」按钮靠它显示"有未导出的改动"角标。
+
+        判定方式：last_change_ms = 各配置表 MAX(updated_at)，
+        last_export_ms = config.json 的 mtime；dirty = last_change_ms > last_export_ms。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  config_path: { type: string, description: config.json 的绝对路径 }
+                  last_export_ms: { type: integer, format: int64, description: 最后一次导出的时间; 0 = 从未导出 }
+                  last_change_ms: { type: integer, format: int64, description: 最后一次配置变更的时间 }
+                  dirty: { type: boolean, description: true = 数据库比 config.json 新 }
+                  pending_changes: { type: integer, description: 未导出的变更行数 }
+
+  /api/v1/settings:
+    get:
+      tags: [settings]
+      summary: 读取 Web 控制台运行时设置
+      description: |
+        这些设置只影响 Web 控制台自身行为，不参与 plcbridge 的采集配置。
+        未显式设置过的键返回默认值。
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auto_export_config:
+                    type: boolean
+                    default: false
+                    description: 配置变更后是否自动导出 config.json（触发 plcbridge 热重载）
+
+  /api/v1/settings/{key}:
+    put:
+      tags: [settings]
+      summary: 修改单个设置
+      parameters:
+        - { in: path, name: key, required: true, schema: { type: string, enum: [auto_export_config] } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value: { type: boolean }
+      responses:
+        '200':
+          description: OK（返回全量最新设置）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auto_export_config: { type: boolean }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/process/control:
+    post:
+      tags: [process]
+      summary: 进程控制（reload / start / stop）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [reload_config, export_config, stop_plcbridge, start_plcbridge, restart_plcbridge-web, start_supervisor, stop_supervisor]
+      responses:
+        '200': { description: OK }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/write:
+    post:
+      tags: [write]
+      summary: 写一个点位
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_biz_id, point_biz_id, value]
+              properties:
+                device_biz_id: { type: string }
+                point_biz_id: { type: string }
+                value: { }  # any
+      responses:
+        '202': { description: 接收成功，异步执行 }
+
+  /api/v1/write/batch:
+    post:
+      tags: [write]
+      summary: 批量写入多个点位（Plan2 新增）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [device_biz_id, writes]
+              properties:
+                device_biz_id: { type: string }
+                transactional: { type: boolean, default: false, description: "true = 失败时回滚已写入的点位" }
+                timeout_ms: { type: integer, default: 5000 }
+                writes:
+                  type: array
+                  items:
+                    type: object
+                    required: [point_biz_id, value, value_type]
+                    properties:
+                      point_biz_id: { type: string }
+                      value: { }
+                      value_type: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trace_id: { type: string }
+                  result: { type: string, enum: [success, fail, partial] }
+                  compensation_triggered: { type: boolean }
+                  writes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        point_biz_id: { type: string }
+                        result: { type: string }
+                        error: { type: string }
+
+  /api/v1/config/backup:
+    post:
+      tags: [config]
+      summary: 导出配置备份（Plan2 新增）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  filename: { type: string }
+                  size: { type: integer }
+                  records: { type: integer }
+
+  /api/v1/config/backup/info:
+    get:
+      tags: [config]
+      summary: 获取最新备份信息（Plan2 新增）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  latest:
+                    type: object
+                    properties:
+                      filename: { type: string }
+                      created_at: { type: string }
+                      db_size_bytes: { type: integer }
+                      db_records: { type: integer }
+
+  /api/v1/config/backups:
+    get:
+      tags: [config]
+      summary: 列出所有备份（Plan2 新增）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        filename: { type: string }
+                        created_at: { type: string }
+                        size: { type: integer }
+                        db_records: { type: integer }
+
+  /api/v1/config/restore:
+    post:
+      tags: [config]
+      summary: 从备份 zip 恢复配置（Plan2 新增）
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: ".zip 备份文件"
+      responses:
+        '200':
+          description: 恢复成功（需刷新页面）
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  db_restored: { type: boolean }
+                  config_restored: { type: boolean }
+                  requires_web_refresh: { type: boolean }
+                  message: { type: string }
+
+  /api/v1/config/backup/{filename}:
+    get:
+      tags: [config]
+      summary: 下载备份文件（Plan2 新增）
+      parameters:
+        - in: path
+          name: filename
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: zip 文件流
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+
+  /api/v1/config/snapshots:
+    get:
+      tags: [config]
+      summary: 列出配置变更历史（Plan3 3.3）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: integer, format: int64 }
+                        description: { type: string }
+                        created_by: { type: string }
+                        record_count: { type: integer }
+                        is_auto: { type: boolean }
+                        created_at: { type: integer, format: int64 }
+                        created_at_str: { type: string }
+                        size_bytes: { type: integer }
+    post:
+      tags: [config]
+      summary: 手动创建配置快照（Plan3 3.3）
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                description: { type: string }
+      responses:
+        '201':
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer, format: int64 }
+                  description: { type: string }
+                  record_count: { type: integer }
+
+  /api/v1/config/snapshots/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [config]
+      summary: 获取单个快照详情（含 config_json）（Plan3 3.3）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: integer, format: int64 }
+                  description: { type: string }
+                  config_json: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [config]
+      summary: 删除快照（Plan3 3.3）
+      responses:
+        '200': { description: 删除成功 }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/config/snapshots/{id}/diff:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    get:
+      tags: [config]
+      summary: 快照与当前配置的差异（Plan3 3.3）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  snapshot_id: { type: integer, format: int64 }
+                  count: { type: integer }
+                  diffs:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity: { type: string, enum: [channels, devices, sources, points, targets] }
+                        key: { type: string }
+                        field: { type: string }
+                        old_value: { type: string }
+                        new_value: { type: string }
+                        change: { type: string, enum: [added, removed, modified] }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/config/snapshots/{id}/rollback:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [config]
+      summary: 回滚到指定快照（Plan3 3.3）
+      description: 回滚前自动创建"回滚前备份"快照；回滚在事务中执行
+      responses:
+        '200':
+          description: 回滚成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rollback: { type: boolean }
+                  snapshot_id: { type: integer, format: int64 }
+                  new_snapshot: { type: integer, format: int64 }
+                  message: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/targets/{biz_id}/diag:
+    parameters:
+      - in: path
+        name: biz_id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [targets]
+      summary: 单个 Target 诊断信息（Plan3 3.4）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target_biz_id: { type: string }
+                  type: { type: string, description: 转发协议类型（mqtt / influxdb） }
+                  format: { type: string, description: 数据序列化格式（json / line_protocol / raw） }
+                  connected: { type: boolean }
+                  last_error: { type: string, description: 最近一次错误（空 = 无错误） }
+                  stats: { type: object, additionalProperties: true, description: 协议自报的运行时统计 }
+                  queue_len: { type: integer }
+                  queue_cap: { type: integer }
+                  dropped_total: { type: integer, format: int64 }
+                  enqueued_total: { type: integer, format: int64 }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { description: plcbridge 主进程未运行 }
+
+  /api/v1/targets/diag:
+    get:
+      tags: [targets]
+      summary: 所有 Target 诊断列表（Plan3 3.4）
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  targets:
+                    type: array
+                    items: { type: object, additionalProperties: true }
+
+  /api/v1/targets/{biz_id}/history:
+    parameters:
+      - in: path
+        name: biz_id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [targets]
+      summary: 查询 Target 历史数据（Plan3 3.5）
+      description: 仅 InfluxDB Target 支持；时间范围最大 7 天，返回点数上限 10000
+      parameters:
+        - in: query
+          name: measurement
+          required: true
+          schema: { type: string }
+          description: InfluxDB measurement 名（通常为 Target 的 topic）
+        - in: query
+          name: field
+          required: false
+          schema: { type: string, default: _value }
+        - in: query
+          name: duration
+          required: false
+          schema: { type: string, default: 1h, example: 6h }
+          description: 时间范围（1m ~ 7d）
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, default: 1000, maximum: 10000 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  target_biz_id: { type: string }
+                  measurement: { type: string }
+                  field: { type: string }
+                  duration: { type: string }
+                  count: { type: integer }
+                  points:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        t: { type: integer, format: int64, description: Unix 毫秒时间戳 }
+                        v: { description: 点位值 }
+        '400':
+          description: 参数错误或该 Target 不支持历史查询
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+components:
+  schemas:
+    SourceHealth:
+      type: object
+      description: >
+        Source 采集健康度（Plan3 3.2）。存在的意义：采集失败时缓存里仍保留最后一次成功的旧值，
+        只有 health 才能告诉调用方"这个值有多新"。
+      required: [source_biz_id, status, last_success_ms, last_error_ms, consecutive_errors, interval_ms]
+      properties:
+        source_biz_id: { type: string }
+        status:
+          type: string
+          enum: [ok, error, never]
+          description: "ok=最近一次采集成功；error=最近一次失败（values 为旧值）；never=从未成功采集过"
+        last_success_ms: { type: integer, format: int64, description: "最近一次成功的时间（Unix ms），从未成功为 0" }
+        last_error_ms: { type: integer, format: int64, description: "最近一次失败的时间（Unix ms），从未失败为 0" }
+        last_error: { type: string, description: "最近一次错误描述（截断 200 字符），无错误省略" }
+        consecutive_errors: { type: integer, description: "连续失败次数，一次成功即归零" }
+        interval_ms: { type: integer, description: "该 Source 的采集间隔，用于推导 stale 阈值" }
+    Channel:
+      type: object
+      required: [channel_biz_id, role, type, address]
+      properties:
+        id: { type: integer, format: int64, readOnly: true }
+        channel_biz_id: { type: string }
+        role: { type: string, enum: [collect, forward] }
+        type: { type: string, description: "协议 / Target 名（modbus 是 modbus_tcp 别名）" }
+        address: { type: string }
+        config: { type: string, description: "JSON 字符串" }
+        queue_size: { type: integer }
+        timeout_ms: { type: integer }
+        heartbeat_enabled: { type: boolean }
+        heartbeat_address: { type: string }
+        heartbeat_max_interval_ms: { type: integer }
+        heartbeat_debounce_ms: { type: integer }
+    ProtocolInfo:
+      type: object
+      required: [name, version, role, config_schema, capabilities]
+      properties:
+        name: { type: string }
+        version: { type: string }
+        role: { type: string, enum: [collect, forward] }
+        config_schema: { type: object, additionalProperties: true }
+        capabilities:
+          type: object
+          properties:
+            supports_batch_read: { type: boolean }
+            supports_batch_write: { type: boolean }
+            supports_heartbeat: { type: boolean }
+            requires_rack_slot: { type: boolean }
+            requires_slave_id: { type: boolean }
+            # 仅 forward 角色的 Target 才有（Go 端 target.Capability）。
+            # 为 true 表示该 Target 实现了 target.HistoryQueryer，支持历史趋势查询。
+            supports_history: { type: boolean }
+    Error:
+      type: object
+      required: [code, msg]
+      properties:
+        code: { type: string, description: "业务错误码（snake_case，强枚举）" }
+        msg: { type: string }
+        i18n_key: { type: string, description: "i18n 资源 key（Plan2 4.2 预留）" }
+  responses:
+    BadRequest:
+      description: 参数错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: 未登录
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: 资源冲突
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ChannelsRuntime:
+      description: Channel 运行时状态快照
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok: { type: boolean, description: 是否成功从主进程取到数据 }
+              error: { type: string, description: 取数失败时的原因，成功时为空字符串 }
+              fetched_at_ms: { type: integer, format: int64 }
+              age_ms: { type: integer, format: int64, description: 缓存数据的年龄 }
+              channels:
+                type: object
+                description: key = channel_biz_id
+                additionalProperties:
+                  type: object
+                  properties:
+                    connected: { type: boolean }
+                    last_active_ms: { type: integer, format: int64 }
+                    last_error: { type: string }
+                    protocol: { type: string }
+                    stats: { type: object, additionalProperties: true }

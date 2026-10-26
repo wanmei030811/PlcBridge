@@ -2,7 +2,7 @@
 import { ref, onMounted, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { listDevices, createDevice, deleteDevice, updateDevice, type Device } from '@/api/devices'
+import { listDevices, createDevice, deleteDevice, updateDevice, type Device, cloneDevice, type CloneRequest } from '@/api/devices'
 import { listChannels, type Channel } from '@/api/channels'
 import IconButton from '@/components/IconButton.vue'
 import Icon from '@/components/Icon.vue'
@@ -16,6 +16,37 @@ const search = ref('')
 const enabledSaving = ref<Record<number, boolean>>({})
 const devDialog = ref(false)
 const devForm = reactive({ device_biz_id: '', name: '', enabled: true })
+
+// === 克隆设备 ===
+const cloneDialogOpen = ref(false)
+const cloneLoading = ref(false)
+const cloneSourceId = ref<number | null>(null)
+const cloneForm = reactive<CloneRequest>({ new_device_biz_id: '', new_device_name: '', biz_id_prefix: 'clone_' })
+function openCloneDialog(row: Device) {
+  cloneSourceId.value = row.id
+  cloneForm.new_device_biz_id = ''
+  cloneForm.new_device_name = row.name ? `${row.name} (副本)` : ''
+  cloneForm.biz_id_prefix = 'clone_'
+  cloneDialogOpen.value = true
+}
+async function onCloneDevice() {
+  if (!cloneForm.new_device_biz_id.trim()) {
+    ElMessage.warning('请输入新设备 ID')
+    return
+  }
+  if (!cloneSourceId.value) return
+  cloneLoading.value = true
+  try {
+    await cloneDevice(cloneSourceId.value, cloneForm)
+    ElMessage.success('克隆成功')
+    cloneDialogOpen.value = false
+    await refresh()
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.error || e?.message || '克隆失败')
+  } finally {
+    cloneLoading.value = false
+  }
+}
 
 async function refresh() {
   loading.value = true
@@ -136,7 +167,7 @@ const enabledCount = () => devices.value.filter(d => d.enabled).length
     <div class="card-block">
       <div class="card-toolbar">
         <div class="toolbar-left">
-          <el-input v-model="search" placeholder="业务ID / 名称" clearable style="width:220px" @input="applyFilter">
+          <el-input v-model="search" placeholder="业务ID / 名称" clearable style="width:220px" @input="applyFilter" class="global-search-input">
             <template #prefix><Icon name="search" :size="14" color="#94a3b8" /></template>
           </el-input>
         </div>
@@ -169,9 +200,10 @@ const enabledCount = () => devices.value.filter(d => d.enabled).length
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="96" align="center">
+        <el-table-column label="操作" width="140" align="center">
           <template #default="{ row }">
             <IconButton name="eye" type="primary" text tip="查看详情" size="small" :icon-size="14" @click="openDetail(row)" />
+            <IconButton name="copy" type="success" text tip="克隆" size="small" :icon-size="14" @click="openCloneDialog(row)" />
             <el-popconfirm title="确认删除设备（级联删除Sources/Points/Targets）?" @confirm="onDeleteDevice(row)">
               <template #reference><IconButton name="trash" type="danger" text tip="删除" size="small" :icon-size="14" no-tooltip /></template>
             </el-popconfirm>
@@ -196,6 +228,28 @@ const enabledCount = () => devices.value.filter(d => d.enabled).length
       <template #footer>
         <IconButton name="x" tip="取消" @click="devDialog = false" />
         <IconButton name="check" type="primary" tip="创建" @click="onCreateDevice" />
+      </template>
+    </el-dialog>
+
+    <!-- 克隆设备对话框 -->
+    <el-dialog v-model="cloneDialogOpen" title="克隆设备" width="480px">
+      <el-form label-width="120px" @submit.prevent>
+        <el-form-item label="新设备 ID" required>
+          <el-input v-model="cloneForm.new_device_biz_id" placeholder="唯一业务 ID" />
+        </el-form-item>
+        <el-form-item label="新设备名称">
+          <el-input v-model="cloneForm.new_device_name" placeholder="设备名称（可选）" />
+        </el-form-item>
+        <el-form-item label="BizID 前缀">
+          <el-input v-model="cloneForm.biz_id_prefix" placeholder="如 clone_ 或 copy_" />
+        </el-form-item>
+        <p style="color: #6b7280; font-size: 13px; padding: 8px 0">
+          将深拷贝设备的所有 Source、Point、Target，Source/Point/Target 的 biz_id 加上前缀以保证唯一性。
+        </p>
+      </el-form>
+      <template #footer>
+        <IconButton name="x" tip="取消" @click="cloneDialogOpen = false" />
+        <IconButton name="check" type="primary" tip="确认克隆" :loading="cloneLoading" @click="onCloneDevice" />
       </template>
     </el-dialog>
   </div>

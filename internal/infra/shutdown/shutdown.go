@@ -1,10 +1,11 @@
 // Package shutdown 提供统一的优雅关闭工具（Phase 1.6）。
 //
 // 用法：
-//   runner := shutdown.New(time.Second*10)
-//   runner.Register("collect", collect.Stop)
-//   runner.Register("api", api.Stop)
-//   runner.Run(ctx) // 阻塞直到 ctx 取消或全部完成
+//
+//	runner := shutdown.New(time.Second*10)
+//	runner.Register("collect", collect.Stop)
+//	runner.Register("api", api.Stop)
+//	runner.Run(ctx) // 阻塞直到 ctx 取消或全部完成
 //
 // 特性：
 //   - 步骤注册：按注册顺序串行执行
@@ -30,9 +31,9 @@ type Step struct {
 
 // Runner 关闭编排器。
 type Runner struct {
-	timeout    time.Duration // 每步默认超时
-	mu         sync.Mutex
-	steps      []Step
+	timeout time.Duration // 每步默认超时
+	mu      sync.Mutex
+	steps   []Step
 }
 
 // New 创建 Runner。

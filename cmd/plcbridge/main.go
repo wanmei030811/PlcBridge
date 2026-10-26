@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -25,8 +26,9 @@ import (
 	"github.com/plcbridge/plcbridge/internal/infra/config"
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
 	"github.com/plcbridge/plcbridge/internal/infra/pool"
-	"github.com/plcbridge/plcbridge/internal/infra/protocol"
-	"github.com/plcbridge/plcbridge/internal/infra/target"
+	_ "github.com/plcbridge/plcbridge/internal/infra/protocol/plugins"
+	"github.com/plcbridge/plcbridge/internal/infra/secconfig"
+	_ "github.com/plcbridge/plcbridge/internal/infra/target/plugins"
 	"github.com/plcbridge/plcbridge/internal/metrics"
 )
 
@@ -43,6 +45,23 @@ func main() {
 	// 2. 解析命令行
 	if *configDir == "" {
 		logging.Error("--config 参数不能为空").Str("service", "plcbridge").Send()
+		os.Exit(1)
+	}
+
+	// 2.1 安全基线：确保 API 密钥可用（fail-fast + 自助生成）。
+	//
+	// 历史问题：MVP 把 HMAC 密钥写死在源码里（auth.DefaultSecret），
+	// 所有部署共用同一个公开密钥 → 任何人拿到该密钥就能伪造 Bearer Token
+	// 调用回写 API。
+	//
+	// 现在：优先用环境变量 PLCBRIDGE_API_SECRET；没有则读/生成
+	// <configDir>/api.secret。plcbridge 与 plcbridge-web 是同机双进程，
+	// 共享同一个文件 → 天然用同一个密钥，谁先启动谁生成。
+	if err := secconfig.EnsureAPISecretWithFallback(*configDir); err != nil {
+		fmt.Fprintf(os.Stderr, "启动被拒绝: %v\n", err)
+		fmt.Fprintf(os.Stderr, "提示: 可设置环境变量指定密钥（web 与 core 必须是同一个），例如:\n")
+		fmt.Fprintf(os.Stderr, "  $env:PLCBRIDGE_API_SECRET = <至少 %d 字节的随机串>\n", secconfig.MinSecretLen)
+		fmt.Fprintf(os.Stderr, "  或设置 PLCBRIDGE_ALLOW_INSECURE_SECRET=1 仅用于本地开发\n")
 		os.Exit(1)
 	}
 
@@ -76,10 +95,11 @@ func main() {
 	}
 
 	// 5. 注册内置协议（S7 / ModbusTCP / OPCUA，均为完整实现）
-	protocol.MustRegisterDefaults()
+	// Plan2 主题 A 3.2：注册已下沉到各 plugin 文件的 init()，启动时由 Go runtime 自动触发。
+	// 此处无需显式调用；加新协议 = 加 plugin 文件 + 文件末尾 init()。
 
 	// 6. 注册内置 Target（MQTT / InfluxDB，均为完整实现）
-	target.MustRegisterDefaults()
+	// 同上：init() 自注册。
 
 	// 7. 初始化 Prometheus 指标
 	metrics.MustRegister()
@@ -111,6 +131,7 @@ func main() {
 	apiServer.SetWriter(writeWorkers)
 	apiServer.SetChannelRegistry(collectWorkers.Channels())
 	apiServer.SetForwardWorkers(forwardWorkers) // forward.Workers 实现了 forwardWorkersSnapshotter 接口
+	apiServer.SetCollectWorkers(collectWorkers) // 用于 GET /api/v1/sources/:biz_id/values 实时值
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			logging.Error("HTTP API 启动失败").Err(err).Send()
@@ -168,10 +189,10 @@ func main() {
 // defaultConfigDir 返回配置目录。
 //
 // 优先级（2026-10-12 重新设计）：
-//   1. -config 命令行参数（最高，由 flag.String 兜底）
-//   2. PLCBRIDGE_CONFIG 环境变量
-//   3. /etc/plcbridge（仅 Linux/macOS）
-//   4. %PROGRAMDATA%\plcbridge（仅 Windows，PROGRAMDATA 未设置时降级 C:\ProgramData）
+//  1. -config 命令行参数（最高，由 flag.String 兜底）
+//  2. PLCBRIDGE_CONFIG 环境变量
+//  3. /etc/plcbridge（仅 Linux/macOS）
+//  4. %PROGRAMDATA%\plcbridge（仅 Windows，PROGRAMDATA 未设置时降级 C:\ProgramData）
 //
 // 历史：2026-10-12 上午曾写死 PROGRAMDATA 拒启动，但用户实际工作流是显式 env
 // 指向 F:\Project\PlcBridge\config（项目级配置，方便 git 同步 + 备份）。重写支持

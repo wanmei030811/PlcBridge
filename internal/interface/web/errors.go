@@ -16,17 +16,27 @@ import (
 //   - 与 Store 层错误（ErrNotFound / ErrConflict）通过 errors.Is 解耦
 //
 // 响应格式：
-//   {"code": "channel_not_found", "msg": "channel 不存在", "http_status": 404}
+//
+//	{"code": "channel_not_found", "msg": "channel 不存在", "http_status": 404}
 //
 // 调用方：
-//   1. 业务错误：用预定义实例（ErrChannelNotFound 等）
-//   2. 参数错误：直接用 ErrInvalidParam.With(msg) 自定义消息
-//   3. Store 错误：handleStoreErr 翻译成对应 APIError
-//   4. 兜底：handleUnknownErr 返回 500
+//  1. 业务错误：用预定义实例（ErrChannelNotFound 等）
+//  2. 参数错误：直接用 ErrInvalidParam.With(msg) 自定义消息
+//  3. Store 错误：handleStoreErr 翻译成对应 APIError
+//  4. 兜底：handleUnknownErr 返回 500
 type APIError struct {
 	Code       string // 业务错误码（snake_case，强枚举）
 	Message    string // 人类可读的默认文案（当前中文，未来可 i18n）
 	HTTPStatus int    // HTTP 状态码
+
+	// I18nKey i18n 资源 key（Plan2 主题 B 4.2 预留）。
+	//
+	// 用途：未来切换 vue-i18n / go-i18n 时，handler / 前端按 I18nKey 查资源，
+	//       找不到时 fallback 到 Message（向后兼容）。
+	//
+	// 当前值：空字符串（未启用 i18n，前端按 msg 字段直接展示）。
+	// 启用方法：批量给所有 var (Err*) 赋 I18nKey = "errors." + Code（与前端 i18n key 对齐）。
+	I18nKey string
 }
 
 // Error 实现 error 接口，方便作为函数返回值。
@@ -47,7 +57,17 @@ func (e *APIError) Is(target error) bool {
 //
 // 用法：ErrInvalidParam.With("device_biz_id 不能为空")
 func (e *APIError) With(msg string) *APIError {
-	return &APIError{Code: e.Code, Message: msg, HTTPStatus: e.HTTPStatus}
+	return &APIError{Code: e.Code, Message: msg, HTTPStatus: e.HTTPStatus, I18nKey: e.I18nKey}
+}
+
+// WithI18nKey 返回带 i18n key 的新实例（Plan2 主题 B 4.2 预留）。
+//
+// 用法：ErrChannelNotFound.WithI18nKey("errors.channel_not_found")
+//
+// 当前未启用 i18n：仅在 errors 资源里登记 key 即可，无需调用方即时改。
+// 启用 i18n 时：批量替换 Message 字段为 i18n key，由前端按 key 翻译。
+func (e *APIError) WithI18nKey(key string) *APIError {
+	return &APIError{Code: e.Code, Message: e.Message, HTTPStatus: e.HTTPStatus, I18nKey: key}
 }
 
 // === 业务错误码（与 Plan.md §8 / §9 业务能力对应）===
@@ -80,6 +100,10 @@ var (
 
 	// ErrInternal 内部错误（兜底 500）。
 	ErrInternal = &APIError{Code: "internal_error", Message: "服务器内部错误", HTTPStatus: http.StatusInternalServerError}
+
+	// ErrPlcbridgeUnavailable plcbridge 主进程暂不可达（web 端代理 :8082 失败）。
+	// 用于 protocolsProxyHandler / metrics_proxy 等跨进程调用场景。
+	ErrPlcbridgeUnavailable = &APIError{Code: "plcbridge_unavailable", Message: "plcbridge 主进程暂不可达", HTTPStatus: http.StatusServiceUnavailable}
 )
 
 // Channel 错误。
@@ -153,10 +177,11 @@ var (
 //   - 兜底：500 internal_error
 //
 // 用法：
-//   if err != nil {
-//       web.WriteError(c, err)
-//       return
-//   }
+//
+//	if err != nil {
+//	    web.WriteError(c, err)
+//	    return
+//	}
 func WriteError(c *gin.Context, err error) {
 	if err == nil {
 		return
@@ -165,10 +190,15 @@ func WriteError(c *gin.Context, err error) {
 	// 业务 APIError 直接用
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		c.JSON(apiErr.HTTPStatus, gin.H{
+		body := gin.H{
 			"code": apiErr.Code,
 			"msg":  apiErr.Message,
-		})
+		}
+		// Plan2 主题 B 4.2 预留：I18nKey 非空时附带，前端按需翻译。
+		if apiErr.I18nKey != "" {
+			body["i18n_key"] = apiErr.I18nKey
+		}
+		c.JSON(apiErr.HTTPStatus, body)
 		return
 	}
 

@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
+import './assets/global.css'
 
 // Element Plus 通过 unplugin-vue-components 的 ElementPlusResolver 按需自动导入。
 // 注意：ElMessage / ElMessageBox / ElNotification / ElLoading 是函数式 API，

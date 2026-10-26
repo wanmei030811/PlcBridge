@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# 取消同一分支的旧 run，避免浪费配额。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # CI 里给一个合规的测试密钥。
+  # 生产密钥由 scripts/supervisor.ps1 在部署机本地生成并落盘，绝不入库。
+  PLCBRIDGE_API_SECRET: ci-only-secret-0123456789abcdef-32bytes
+  # 让测试里的弱密钥检查保持开启（不设逃生开关），
+  # 这样"某个测试偷偷依赖弱密钥"会被立刻发现。
+  GOFLAGS: -mod=mod
+
+jobs:
+  # ===== 单元测试（含 race detector）=====
+  test:
+    name: test (race, linux/${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # go.mod 声明 `go 1.24.0`，低于 1.24 的工具链会直接拒绝构建：
+        # "go.mod requires go >= 1.24.0 (running go 1.23.x)"。
+        # 之前这里写的是 1.22/1.23，CI 一次都没跑起来过。
+        go: ['1.24', '1.25', '1.26']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l . | grep -v '^web/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # race detector 需要 cgo；ubuntu-latest 自带 gcc。
+      - name: Test with race detector
+        run: go test -race -count=1 -timeout 20m ./...
+
+      - name: Coverage report
+        if: matrix.go == '1.26'
+        run: go test -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage to Codecov
+        if: matrix.go == '1.26'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ===== 跨平台编译 =====
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build core
+        run: go build -o /dev/null ./cmd/plcbridge
+        if: runner.os == 'Linux'
+
+      - name: Build core (windows)
+        run: go build -o plcbridge.exe ./cmd/plcbridge
+        if: runner.os == 'Windows'
+
+      - name: Build web
+        run: go build -o /dev/null ./cmd/plcbridge-web
+        if: runner.os == 'Linux'
+
+      - name: Build web (windows)
+        run: go build -o plcbridge-web.exe ./cmd/plcbridge-web
+        if: runner.os == 'Windows'
+
+  # ===== 安全基线检查 =====
+  security:
+    name: security baseline
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # 防止把弱密钥 / 默认密钥写回源码。
+      # 允许出现在 auth（常量定义）与 secconfig（黑名单定义）里，这两个位置
+      # 是"声明该弱值不可用"，不是"使用该弱值"。测试文件也允许（用于验证黑名单）。
+      - name: Reject hardcoded default secret
+        run: |
+          hits=$(grep -rn --include='*.go' --include='*.ps1' --include='*.sh' \
+                   'plcbridge-default-secret-change-me' . \
+                   | grep -v '_test\.go:' \
+                   | grep -v 'internal/infra/auth/auth\.go:' \
+                   | grep -v 'internal/infra/secconfig/secconfig\.go:' || true)
+          if [ -n "$hits" ]; then
+            echo "::error::Hardcoded default API secret found outside auth/secconfig packages:"
+            echo "$hits"
+            exit 1
+          fi
+          echo "ok: no hardcoded default secret outside auth/secconfig"
+
+      # 确认 supervisor 不会在仓库里留下密钥文件。
+      - name: Ensure secret files are gitignored
+        run: |
+          for f in config/api.secret api.secret; do
+            if git check-ignore -q "$f"; then
+              echo "ok: $f is gitignored"
+            else
+              echo "::error::$f is NOT gitignored — secret could be committed!"
+              exit 1
+            fi
+          done
+
+      # go:embed 的产物目录必须存在，否则干净克隆无法编译。
+      #
+      # 注意：这里不能只判断「文件存在」——vite 的 emptyOutDir 会清空 dist/，
+      # 曾经把 .gitkeep 删掉导致本检查静默失效（文件确实不在 → 检查会红，
+      # 但没人跑 CI 就没人知道）。现在改成真正验证 embed 能编译。
+      - name: Ensure embedded frontend placeholder exists
+        run: |
+          if [ ! -f internal/interface/web/dist/.gitkeep ]; then
+            echo "::error::internal/interface/web/dist/.gitkeep missing — go:embed would fail on clean clone."
+            echo "::error::提示：跑一次 \`cd web && npm install && npm run build\` 会自动重建该锚点。"
+            exit 1
+          fi
+          echo "ok: embed placeholder present"
+
+      # 真正编译一次内嵌 SPA 的包，验证 go:embed 模式能匹配到文件。
+      # 这一步是 #1 阻断项的回归守卫：embed.go 里 `//go:embed all:dist` 一旦
+      # 因为目录布局改动而匹配不到任何文件，go build 会在这里直接失败。
+      - name: Verify go:embed of frontend dist compiles
+        run: go build ./internal/interface/web/
+
+  # ===== Windows 脚本编码检查 =====
+  #
+  # PowerShell 5.1 读取「UTF-8 无 BOM」的 .ps1 时会按 ANSI 代码页解码，
+  # 中文变乱码，甚至语法解析失败（实测 supervisor.ps1 丢 BOM 后 7 个 parse error）。
+  # scripts/fix-utf8.ps1 可一键修复；这里在 CI 里守住回归。
+  scripts:
+    name: scripts encoding
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check PowerShell scripts parse and have UTF-8 BOM
+        shell: pwsh
+        run: |
+          $errors = 0
+          Get-ChildItem -Path scripts -Filter '*.ps1' -File -Recurse | ForEach-Object {
+            $bytes = [System.IO.File]::ReadAllBytes($_.FullName)
+            $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+            if (-not $hasBom) {
+              Write-Host "::error::$($_.Name) is missing UTF-8 BOM — run .\scripts\fix-utf8.ps1"
+              $errors++
+            }
+            $parseErrors = $null
+            $tokens = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors -and $parseErrors.Count -gt 0) {
+              Write-Host "::error::$($_.Name) has $($parseErrors.Count) parse error(s)"
+              $parseErrors | Select-Object -First 3 | ForEach-Object {
+                Write-Host "  line $($_.Extent.StartLineNumber): $($_.Message)"
+              }
+              $errors++
+            }
+          }
+          if ($errors -gt 0) { exit 1 }
+          Write-Host "ok: all PowerShell scripts have BOM and parse cleanly"

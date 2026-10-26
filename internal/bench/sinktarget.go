@@ -25,10 +25,10 @@ type SinkPlugin struct {
 
 // SinkStats 是 sink target 的全局计数（端到端压力指标）。
 type SinkStats struct {
-	Sent       atomic.Uint64  // 收到的 total PointValue 数
-	Batches    atomic.Uint64  // Send 调用次数
-	LastSentAt atomic.Int64   // UnixNano of last batch
-	MaxLatency atomic.Int64   // max Send latency in ms
+	Sent       atomic.Uint64 // 收到的 total PointValue 数
+	Batches    atomic.Uint64 // Send 调用次数
+	LastSentAt atomic.Int64  // UnixNano of last batch
+	MaxLatency atomic.Int64  // max Send latency in ms
 }
 
 // NewSinkPlugin 创建一个 sink plugin，共享一份 stats。
@@ -43,6 +43,13 @@ func (p *SinkPlugin) Name() string    { return "sink" }
 func (p *SinkPlugin) Version() string { return "bench-1.0" }
 func (p *SinkPlugin) ConfigSchema() json.RawMessage {
 	return json.RawMessage(`{"type":"object"}`)
+}
+
+// Capabilities sink Target：不支持历史查询（仅内存计数，无时序存储）。
+func (p *SinkPlugin) Capabilities() target.Capability {
+	return target.Capability{
+		SupportsHistory: false,
+	}
 }
 
 func (p *SinkPlugin) Init(_ context.Context) error { return nil }

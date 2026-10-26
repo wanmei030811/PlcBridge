@@ -21,7 +21,7 @@ import (
 )
 
 var (
-	globalLogger  zerolog.Logger
+	globalLogger zerolog.Logger
 	initOnce     sync.Once
 	// 注入的额外 writer（测试时通过 SetOutput 替换整体输出）
 	extraWriter io.Writer

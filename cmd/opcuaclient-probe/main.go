@@ -1,9 +1,10 @@
 // opcuaclient-probe —— 用 gopcua/opcua 直接连 opc.tcp://host:port 探一个节点，验证 OPC UA server 可达。
 //
 // 用法：
-//   go run ./cmd/opcuaclient-probe
-//   go run ./cmd/opcuaclient-probe -endpoint opc.tcp://127.0.0.1:4840 -node "ns=0;i=2258"
-//   go run ./cmd/opcuaclient-probe -subscribe -node "ns=2;s=Demo.Dynamic.Scalar.Float"
+//
+//	go run ./cmd/opcuaclient-probe
+//	go run ./cmd/opcuaclient-probe -endpoint opc.tcp://127.0.0.1:4840 -node "ns=0;i=2258"
+//	go run ./cmd/opcuaclient-probe -subscribe -node "ns=2;s=Demo.Dynamic.Scalar.Float"
 package main
 
 import (

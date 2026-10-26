@@ -1,0 +1,50 @@
+# 统一换行符 —— 修复 CI 上 gofmt 误报
+#
+# 问题背景：
+#   Windows 开发者本地 git config core.autocrlf=true，检出时把 LF 转成 CRLF。
+#   gofmt 要求源码用 LF，于是 `gofmt -l .` 在 Windows 工作区把**每一个** .go 文件
+#   都列出来（diff 显示全文件都变了，实际只是行尾符），
+#   导致 CI 的格式检查在 Windows 检出时全红。
+#
+# 解决办法：
+#   显式声明 .go / .yaml / .yml / .json / .sh 用 LF（这些是跨平台工具链读取的），
+#   Windows 批处理用 CRLF（cmd.exe 需要 CRLF 才能正确解析）。
+#   *.go 标记为 text eol=lf —— 检出时不再转换，gofmt 在任何平台都干净。
+#
+# 注意：
+#   .gitattributes 优先于 core.autocrlf，且对已入库文件生效需要重新检出
+#   （git rm --cached -r . && git reset --hard，或 git add --renormalize .）。
+
+# ===== 源码：强制 LF =====
+*.go      text eol=lf
+*.mod     text eol=lf
+*.sum     text eol=lf
+*.yaml    text eol=lf
+*.yml     text eol=lf
+*.json    text eol=lf
+*.sh      text eol=lf
+*.ts      text eol=lf
+*.vue     text eol=lf
+*.css     text eol=lf
+*.js      text eol=lf
+*.html    text eol=lf
+*.md      text eol=lf
+*.sql     text eol=lf
+Makefile  text eol=lf
+
+# ===== Windows 脚本：保留 CRLF =====
+*.ps1     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+# ===== 二进制：不做任何转换 =====
+*.exe     binary
+*.zip     binary
+*.db      binary
+*.db-wal  binary
+*.db-shm  binary
+*.png     binary
+*.ico     binary
+*.woff    binary
+*.woff2   binary
+*.ttf     binary

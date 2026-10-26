@@ -16,11 +16,11 @@ import (
 // CollectDurSnapshot 是单次 scrape 后的延迟分布快照。
 type CollectDurSnapshot struct {
 	Timestamp time.Time
-	Count     uint64   // plcbridge_collect_duration_seconds_count
-	SumSec    float64  // plcbridge_collect_duration_seconds_sum
-	P50MS     float64  // 50 分位（ms）
-	P99MS     float64  // 99 分位（ms）
-	MaxMS     float64  // max bucket（ms）
+	Count     uint64  // plcbridge_collect_duration_seconds_count
+	SumSec    float64 // plcbridge_collect_duration_seconds_sum
+	P50MS     float64 // 50 分位（ms）
+	P99MS     float64 // 99 分位（ms）
+	MaxMS     float64 // max bucket（ms）
 }
 
 // ScrapeCollectDuration 拉一次 metrics server，把 collect_duration 的 histogram

@@ -1,7 +1,8 @@
 // Package protocol —— ProtocolChannel 单例缓存层。
 //
 // 目的：避免每个 Source / Heartbeat Worker 都各自对一个 Channel 建立独立 TCP 连接，
-//       并发挤爆 S7 PLC（§6.2.1 协议层硬约束：S7-200 SMART 1~2 / S7-1200 4~6 / S7-1500 8~16）。
+//
+//	并发挤爆 S7 PLC（§6.2.1 协议层硬约束：S7-200 SMART 1~2 / S7-1200 4~6 / S7-1500 8~16）。
 //
 // 设计：
 //   - ChannelRegistry 按 channel_biz_id 缓存 *cachedChannel
@@ -86,6 +87,30 @@ func NewChannelRegistry() *ChannelRegistry {
 	}
 }
 
+// canonicalizeChannelType 把历史 channel.type 别名归一化为注册名（Plan2 3.5 收尾）。
+//
+// 集中定义在 protocol 包（事实源），其他包（handler / web）也用同一份。
+// 只做白名单映射，不模糊匹配，保持简单可预测。
+//
+// 注意：本函数**不写回 ch.Type**，仅用于查表。历史数据（ch.Type=='modbus'）仍
+// 以原样保留在 SQLite / config.json 中；前端展示和 worker 调度统一在查表时归一化。
+// 后续可一次性把历史数据从 'modbus' 改写为 'modbus_tcp'（数据迁移），本函数保留。
+func canonicalizeChannelType(typ string) string {
+	switch typ {
+	case "modbus":
+		return "modbus_tcp"
+	}
+	return typ
+}
+
+// CanonicalizeChannelType 暴露给外部包使用（Plan2 3.5 收尾）。
+//
+// 例如 web handler 的 isKnownChannelType 也需要归一化才能正确判断
+// 'modbus' 是否合法。
+func CanonicalizeChannelType(typ string) string {
+	return canonicalizeChannelType(typ)
+}
+
 // Acquire 取出/创建 channel_biz_id 对应的 ProtocolChannel（引用计数 +1）。
 //
 // 同一 channel_biz_id 多次 Acquire 返回同一个 ProtocolChannel。
@@ -107,8 +132,11 @@ func (r *ChannelRegistry) Acquire(ctx context.Context, ch *platform.Channel) (Pr
 		return cli, nil
 	}
 
-	// 创建新通道
-	plugin, err := Get(ch.Type)
+	// Plan2 3.5 收尾：channel.type 历史别名归一化。
+	// 集中在这里而不是分散在 collect worker / forward worker，保证"任何路径走 Acquire
+	// 都能解析到 plugin"。归一化只影响查找，不写回 ch（不破坏历史数据语义）。
+	canonicalType := canonicalizeChannelType(ch.Type)
+	plugin, err := Get(canonicalType)
 	if err != nil {
 		r.mu.Unlock()
 		return nil, err
@@ -268,16 +296,16 @@ func (r *ChannelRegistry) CloseAll() {
 //
 // 通用字段（所有协议都填）：Connected / LastActiveMs / LastError。
 // 协议特定数据：Protocol（"s7" / "modbus_tcp" / "opcua" / "mqtt" / "influxdb"）
-//               + Stats（map[string]any，由各 driver 的 Stats() 填充）。
+//   - Stats（map[string]any，由各 driver 的 Stats() 填充）。
 //
 // Protocol + Stats 让前端可以按 type 渲染不同诊断卡片（s7 看 connection_state + rack/slot，
 // opcua 看 session_id，mqtt 看 broker_url + queue_depth 等）。扩展新协议时无需改本结构。
 type ChannelSnapshot struct {
 	Connected    bool           `json:"connected"`
-	LastActiveMs int64          `json:"last_active_ms"` // 最近成功操作的 unix ms；0 表示从未使用
-	LastError    string         `json:"last_error"`     // 最近一次错误；空字符串表示无
+	LastActiveMs int64          `json:"last_active_ms"`     // 最近成功操作的 unix ms；0 表示从未使用
+	LastError    string         `json:"last_error"`         // 最近一次错误；空字符串表示无
 	Protocol     string         `json:"protocol,omitempty"` // 协议类型（s7 / modbus_tcp / opcua / mqtt / influxdb）
-	Stats        map[string]any `json:"stats,omitempty"`     // 协议特定运行时数据（见 ProtocolChannel.Stats 注释）
+	Stats        map[string]any `json:"stats,omitempty"`    // 协议特定运行时数据（见 ProtocolChannel.Stats 注释）
 }
 
 // ProbeIdleThreshold 多久没活动就触发一次 ProbeActive。
@@ -288,15 +316,16 @@ const ProbeIdleThreshold = 10 * time.Second
 // ReconnectThrottle 错误状态下两次 Reconnect 尝试之间的最小间隔（普通错误路径）。
 //
 // 历史：
-//   v1: 3s（最早，节流 + snapshot 周期对齐）→ 用户感知 ON→OFF ~6-8s
-//   v2: 100ms（用 lastErrAt 节流）→ 1Hz read 持续刷 lastErrAt，节流失效
-//   v3 (current): 500ms（用 registry.reconnectAt 节流，不受 read 错误流影响）
+//
+//	v1: 3s（最早，节流 + snapshot 周期对齐）→ 用户感知 ON→OFF ~6-8s
+//	v2: 100ms（用 lastErrAt 节流）→ 1Hz read 持续刷 lastErrAt，节流失效
+//	v3 (current): 500ms（用 registry.reconnectAt 节流，不受 read 错误流影响）
 //
 // 设 500ms 理由：
 //   - gos7 ConnectContext 实际耗时 100~500ms（成功）/ 2s（connect timeout 失败）
 //   - 500ms 保证同一 reconnect goroutine 跑完后再起下一次，避免互相阻塞
 //   - 1Hz 前端轮询下 OFF→ON 反映延迟 ≈ 1.5s (worst: read 失败 + snapshot 触发 reconnect
-//     + 1Hz 轮询命中)；ON→OFF 反映延迟 ≈ 1s (collect read 失败后第一个 snapshot 触发)
+//   - 1Hz 轮询命中)；ON→OFF 反映延迟 ≈ 1s (collect read 失败后第一个 snapshot 触发)
 //
 // handler 死亡特例（"is null" / "未连接"）走 isHandlerDeadErr 旁路，用更短的
 // ReconnectThrottleFast = 200ms，因为 handler 死了 connect 必然快速失败（~100ms），
@@ -322,7 +351,7 @@ func isHandlerDeadErr(s string) bool {
 		"closed pipe",               // io.ErrClosedPipe
 		"closed network connection", // net.ErrClosed
 		"connection reset",          // RST from peer
-		"未连接",                    // plcbridge 内部："S7 channel X 未连接"（client==nil）
+		"未连接",                       // plcbridge 内部："S7 channel X 未连接"（client==nil）
 	}
 	for _, sub := range deadSubstrings {
 		if strings.Contains(low, sub) {
@@ -447,23 +476,23 @@ func (r *ChannelRegistry) Snapshot() map[string]ChannelSnapshot {
 				// 重连条件：lastErr 非空且距上次 reconnect > ReconnectThrottle（500ms）。
 				// handler 死亡错误走 isHandlerDeadErr 旁路，更短节流 (200ms)。
 				// 用一个独立的较长 ctx（3s），避免 read 短 ctx 拖垮 S7 握手。
-			rctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			logging.Info(logging.EventSnapshotReconnect).
-				Str("channel", id).
-				Msg("snapshot reconnect attempt")
-			// 强制重建：底层 socket 可能已被 PLC 关死，Connect 幂等不会重连。
-			rerr := cli.Reconnect(rctx)
-			cancel()
-			if rerr == nil {
-				logging.Info(logging.EventSnapshotReconnectOK).
+				rctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				logging.Info(logging.EventSnapshotReconnect).
 					Str("channel", id).
-					Msg("snapshot reconnect 成功")
-			} else {
-				logging.Info(logging.EventSnapshotReconnectFail).
-					Str("channel", id).
-					Err(rerr).
-					Msg("snapshot reconnect 仍失败")
-			}
+					Msg("snapshot reconnect attempt")
+				// 强制重建：底层 socket 可能已被 PLC 关死，Connect 幂等不会重连。
+				rerr := cli.Reconnect(rctx)
+				cancel()
+				if rerr == nil {
+					logging.Info(logging.EventSnapshotReconnectOK).
+						Str("channel", id).
+						Msg("snapshot reconnect 成功")
+				} else {
+					logging.Info(logging.EventSnapshotReconnectFail).
+						Str("channel", id).
+						Err(rerr).
+						Msg("snapshot reconnect 仍失败")
+				}
 				lk.Unlock()
 				// 重新读最新状态
 				last = cli.LastActiveAt()

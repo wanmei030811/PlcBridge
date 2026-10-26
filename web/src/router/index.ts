@@ -15,7 +15,11 @@ const routes = [
       { path: 'targets', redirect: '/devices' },
       { path: 'tokens', name: 'tokens', component: () => import('@/pages/Tokens.vue') },
       { path: 'settings/account', name: 'account', component: () => import('@/pages/settings/Account.vue') },
-      { path: 'system/icons', name: 'system-icons', component: () => import('@/pages/system/Icons.vue') }
+      { path: 'settings/backup', name: 'backup', component: () => import('@/pages/settings/Backup.vue') },
+      { path: 'settings/history', name: 'config-history', component: () => import('@/pages/settings/History.vue') },
+      { path: 'settings/general', name: 'settings-general', component: () => import('@/pages/settings/General.vue') },
+      { path: 'system/icons', name: 'system-icons', component: () => import('@/pages/system/Icons.vue') },
+      { path: 'system/shortcuts', name: 'system-shortcuts', component: () => import('@/pages/system/Shortcuts.vue') }
     ]
   },
   // catch-all 404

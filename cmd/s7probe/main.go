@@ -1,8 +1,9 @@
 // s7probe —— 直接用 robinson/gos7 连 127.0.0.1:102 探 M100 / DB1.DBD0，验证 S7 server 可达。
 //
 // 用法：
-//   go run ./cmd/s7probe
-//   go run ./cmd/s7probe -addr 127.0.0.1:102 -rack 0 -slot 1
+//
+//	go run ./cmd/s7probe
+//	go run ./cmd/s7probe -addr 127.0.0.1:102 -rack 0 -slot 1
 package main
 
 import (

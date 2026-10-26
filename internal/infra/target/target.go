@@ -13,11 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
+	"github.com/plcbridge/plcbridge/internal/metrics"
 	"github.com/plcbridge/plcbridge/internal/platform"
 )
 
@@ -37,6 +39,16 @@ type TargetPlugin interface {
 	Name() string
 	Version() string
 	ConfigSchema() json.RawMessage
+
+	// Capabilities 声明本 Target 的运行时能力（Plan2 主题 A 3.6，forward 侧对称扩展）。
+	//
+	// 用途：
+	//   - Web 端：按 SupportsHistory 决定是否渲染「历史趋势」按钮
+	//     （不再在前端硬编码 channel type 白名单，避免前后端两份事实源）
+	//   - 文档生成：自动产出「Target 能力矩阵」
+	//
+	// 实现要求：返回零值 Capability 即可（不实现任何高级特性）。
+	Capabilities() Capability
 
 	Init(ctx context.Context) error
 	Close() error
@@ -81,13 +93,72 @@ type TargetClient interface {
 //
 // 这是可选接口，不实现也不会编译失败（forward.Workers 用 type assertion）。
 // 推荐所有 TargetClient 实现 Close 以避免 reload 时的资源泄漏
-//（MQTT conn、InfluxDB HTTP conn pool、autopaho background goroutine）。
+// （MQTT conn、InfluxDB HTTP conn pool、autopaho background goroutine）。
 type TargetCloser interface {
 	Close() error
 }
 
-// === 全局注册表 ===
+// HistoryQueryer 是可选接口：支持历史数据查询的 TargetClient（Plan3 3.5）。
+//
+// 目前只有 InfluxDB 实现（用于前端历史趋势图）。
+// 实现要求：
+//   - 自行限制查询时间范围（默认最大 7 天）与返回点数（默认最大 10000）
+//   - 不接受任意 SQL 注入风险的高危操作（Flux 是查询语言，风险较低，
+//     但实现方仍应校验 measurement 白名单）
+//
+// 设计说明（2026-10-21 修正）：
+//
+//	早期签名是 QueryHistory(ctx, query string)，query 由 api 层用
+//	buildInfluxFluxQuery 拼好的 Flux 文本。这把「V2 专用的 Flux 方言」硬编码
+//	进了接口，导致 V1 客户端（version=1.x，走 net/http 自实现）无法实现该接口——
+//	V1 没有 Flux 引擎，收到 Flux 串根本没法执行。
+//	现在改为传结构化参数 HistoryQuery，由 Target 自行翻译成本版本查询语句，
+//	接口对 V1 / V2 通用。
+type HistoryQueryer interface {
+	// QueryHistory 执行一次历史查询，返回行数组（每行是 map[string]any）。
+	// 通用字段约定：
+	//   - "_time"   : 时间戳（time.Time 或 int64 毫秒）
+	//   - "_value"  : 点位值
+	//   - 其他 key  : tag / field 名
+	QueryHistory(ctx context.Context, q HistoryQuery) (any, error)
+}
 
+// HistoryQuery 是历史查询的结构化参数（与具体存储实现无关）。
+//
+// 由 api 层从 HTTP query string 解析并做安全收敛后传入，
+// Target 客户端负责翻译成自己版本的查询语句（Flux / InfluxQL）。
+type HistoryQuery struct {
+	// Measurement 是 measurement 名（InfluxDB 的 _measurement）。
+	// 写入侧用 Target.Topic 作为 measurement 名。
+	Measurement string
+
+	// Field 是字段名（InfluxDB 的 _field）。
+	// 写入侧用 Point.PointBizID 作为 field key。
+	// 空串表示不限字段。
+	Field string
+
+	// Duration 是时间窗口，形如 "1h" / "15m" / "7d"。
+	// 已由 api 层收敛到 1m ~ 7d。
+	Duration string
+
+	// Limit 是返回点数上限。已由 api 层收敛到 1 ~ 10000。
+	Limit int
+}
+
+// Capability 描述 Target 的运行时能力（Plan2 主题 A 3.6，forward 侧对称扩展）。
+//
+// 与 protocol.Capability 对称，但字段集合是 forward 侧特有的。
+// 命名约定：
+//   - Supports*  → 运行时能力（该 Target 能做什么）
+type Capability struct {
+	// SupportsHistory 是否支持历史数据查询（实现 target.HistoryQueryer 接口）。
+	//
+	// 目前只有 InfluxDB 的 V1（InfluxQL）与 V2/V1.8+/V3（Flux）客户端实现了该接口。
+	// 前端据此决定是否渲染「历史趋势」按钮——避免前端硬编码 channel type 白名单。
+	SupportsHistory bool `json:"supports_history"`
+}
+
+// === 全局注册表 ===
 var (
 	registry   = map[string]TargetPlugin{}
 	registryMu sync.RWMutex
@@ -119,10 +190,52 @@ func Get(name string) (TargetPlugin, error) {
 	return p, nil
 }
 
-func MustRegisterDefaults() {
-	MustRegister(newMQTTPlugin())
-	MustRegister(newInfluxDBPlugin())
+// Unregister 注销 Target 插件（仅供测试用）。
+//
+// 与 protocol.Unregister 对称。
+func Unregister(name string) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	delete(registry, name)
 }
+
+// TargetInfo 是单个 Target 插件对外暴露的元信息（Plan2 主题 A 3.3）。
+//
+// 与 protocol.ProtocolInfo 对称：供 GET /api/v1/protocols 接口统一返回 collect + forward 两类。
+type TargetInfo struct {
+	Name         string          `json:"name"`
+	Version      string          `json:"version"`
+	Role         string          `json:"role"` // 固定 "forward"
+	ConfigSchema json.RawMessage `json:"config_schema"`
+	// Capabilities 声明该 Target 的运行时能力（与 protocol.ProtocolInfo.Capabilities 对称）。
+	//
+	// 前端按 SupportsHistory 决定是否渲染「历史趋势」按钮。
+	Capabilities Capability `json:"capabilities"`
+}
+
+// AllInfo 返回所有已注册 Target 插件的元信息（按 name 字典序）。
+//
+// 线程安全：读持有 registryMu.RLock；plugin 内部方法（Name/Version/ConfigSchema/Capabilities）
+// 必须是无状态读。
+func AllInfo() []TargetInfo {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]TargetInfo, 0, len(registry))
+	for _, p := range registry {
+		out = append(out, TargetInfo{
+			Name:         p.Name(),
+			Version:      p.Version(),
+			Role:         "forward",
+			ConfigSchema: p.ConfigSchema(),
+			Capabilities: p.Capabilities(),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// 注意：MVP 内置 Target 的注册已从 MustRegisterDefaults 改为各 plugin 文件末尾的 init() 自注册（Plan2 主题 A 3.2）。
+// 加新 Target：新建 plugin 文件 → 实现 TargetPlugin 接口 → 文件末尾加 init() 调 Register 即可。
 
 // Queue 是 Target 的有界队列（§6.1）。
 //
@@ -136,14 +249,37 @@ type Queue struct {
 	dropped  atomic.Uint64
 	enqueued atomic.Uint64
 	closed   atomic.Bool
+
+	// targetBizID 用于 Prometheus 指标打标签（plcbridge_target_dropped_total）。
+	//
+	// 为什么存 ID 而不是只靠调用方传：
+	// 队列满丢数据发生在 Enqueue 内部（drop-oldest 策略），
+	// 那一刻只有 Queue 自己知道丢了多少 —— 如果不上报，
+	// "下游消费慢导致持续丢数据"这个最重要的生产故障就完全不可见。
+	targetBizID string
 }
 
 // NewQueue 创建容量为 size 的有界队列。
-func NewQueue(size int) *Queue {
+//
+// targetBizID 用于 Prometheus 指标标签；传空串则不上报丢弃计数
+// （测试场景可以传空）。
+func NewQueue(size int, targetBizID ...string) *Queue {
 	if size <= 0 {
 		size = 1000
 	}
-	return &Queue{ch: make(chan PointValue, size)}
+	id := ""
+	if len(targetBizID) > 0 {
+		id = targetBizID[0]
+	}
+	return &Queue{ch: make(chan PointValue, size), targetBizID: id}
+}
+
+// reportDropped 上报丢弃计数到 Prometheus。
+func (q *Queue) reportDropped(reason string, n uint64) {
+	if q.targetBizID == "" || n == 0 {
+		return
+	}
+	metrics.TargetDroppedTotal.WithLabelValues(q.targetBizID, reason).Add(float64(n))
 }
 
 // Close 关闭队列。已关闭后 Enqueue 直接 drop；Dequeue/Raw 立即收到 closed 信号。
@@ -165,36 +301,69 @@ func (q *Queue) Clear() int {
 			n++
 		default:
 			q.dropped.Add(uint64(n))
+			q.reportDropped("cleared", uint64(n))
 			return n
 		}
 	}
 }
 
 // Enqueue 非阻塞入队，满了删除队头。queue 已关闭时直接 drop。
+//
+// 关闭竞态（Plan2 7.2 bugfix）：
+//
+//	Enqueue 与 Close 不在同一个锁里，"closed.Load() == false" 与 "q.ch <- v" 之间存在
+//	toctou 窗口：另一个 goroutine 正好在此期间调 Close → 关闭后的 channel send 会 panic。
+//	标准解法：把 send 包到带 recover 的闭包里，把 panic 转换成 dropped 计数 + warn 日志。
+//	性能：闭包 + recover 每次 Enqueue 多 ~50ns，可接受（与 PLC 周期 1ms 相比可忽略）。
 func (q *Queue) Enqueue(v PointValue) {
 	if q.closed.Load() {
 		q.dropped.Add(1)
+		q.reportDropped("closed", 1)
 		return
 	}
 	for {
-		select {
-		case q.ch <- v:
+		// trySend 把 send 包到闭包里，捕获 toctou 窗口里的 "send on closed channel" panic
+		// 返回 (ok, panicked)：ok 表示 send 真的完成；panicked 表示与 Close 竞态 → drop
+		trySend := func() (ok, panicked bool) {
+			defer func() {
+				if r := recover(); r != nil {
+					panicked = true
+				}
+			}()
+			select {
+			case q.ch <- v:
+				return true, false
+			default:
+				return false, false
+			}
+		}
+		ok, panicked := trySend()
+		if panicked {
+			q.dropped.Add(1)
+			q.reportDropped("closed_race", 1)
+			logging.Warn("target_queue_send_on_closed").
+				Str("event", "target_queue_race").
+				Msg("Enqueue 与 Close 竞态：send-on-closed-channel 已被 recover，丢弃该值")
+			return
+		}
+		if ok {
 			q.enqueued.Add(1)
 			return
+		}
+		// select default：队列满 → 丢弃队头 + 重试
+		if q.closed.Load() {
+			q.dropped.Add(1)
+			q.reportDropped("closed", 1)
+			return
+		}
+		select {
+		case <-q.ch:
+			q.dropped.Add(1)
+			q.reportDropped("queue_full", 1)
+			logging.Warn(logging.EventTargetQueueFull).
+				Str("event", "target_queue_full").
+				Msg("Target 队列满，丢弃队头")
 		default:
-			// 关闭后 channel 上 send 会 panic，需重新检查
-			if q.closed.Load() {
-				q.dropped.Add(1)
-				return
-			}
-			select {
-			case <-q.ch:
-				q.dropped.Add(1)
-				logging.Warn(logging.EventTargetQueueFull).
-					Str("event", "target_queue_full").
-					Msg("Target 队列满，丢弃队头")
-			default:
-			}
 		}
 	}
 }
@@ -219,3 +388,6 @@ func (q *Queue) Closed() bool { return q.closed.Load() }
 func (q *Queue) Stats() (length, dropped, enqueued int) {
 	return len(q.ch), int(q.dropped.Load()), int(q.enqueued.Load())
 }
+
+// Cap 返回队列容量。
+func (q *Queue) Cap() int { return cap(q.ch) }

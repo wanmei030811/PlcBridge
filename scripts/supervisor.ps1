@@ -1,4 +1,4 @@
-# PlcBridge supervisor (Windows / PowerShell 5.1) -- shell-based, no Start-Process tricks
+﻿# PlcBridge supervisor (Windows / PowerShell 5.1) -- shell-based, no Start-Process tricks
 #
 # - Spawn plcbridge-web and plcbridge via cmd /c start (detached, hidden)
 # - Port-based watchdog every 3s
@@ -53,12 +53,84 @@ $StateFile       = Join-Path $RunDir 'supervisor.state.json'
 $FlagsFile      = Join-Path $RunDir 'supervisor.flags.json'
 $ControlPending  = Join-Path $RunDir 'control.pending.json'
 $ControlDoneDir  = Join-Path $RunDir 'control.done'
+$ApiSecretFile   = Join-Path $ConfigDir 'api.secret'
 if (-not (Test-Path $ControlDoneDir)) { New-Item -ItemType Directory -Force -Path $ControlDoneDir | Out-Null }
 if (-not (Test-Path $FlagsFile)) {
     '{"pause_core":false,"pause_web":false,"updated_at":"1970-01-01T00:00:00Z"}' | Set-Content -Path $FlagsFile -Encoding UTF8
 }
 
 # ============== Helpers ==============
+
+# Get-OrCreateApiSecret 返回 web/core 共享的 HMAC 签名密钥。
+#
+# 优先级：
+#   1. 环境变量 PLCBRIDGE_API_SECRET（外部注入，如 CI / 容器 secret）
+#   2. <ConfigDir>/api.secret 文件（已存在 → 直接用）
+#   3. 都没有 → 生成 32 字节随机密钥并**独占创建**该文件
+#
+# 为什么需要它：
+#   MVP 时代 HMAC 密钥写死在源码（auth.DefaultSecret），所有部署共用同一个
+#   公开密钥 → 任何人可伪造 Bearer Token 调回写 API。
+#
+# 与 Go 侧的关系（internal/infra/secconfig）：
+#   web / core 进程本身也能读/生成这个文件（secconfig.EnsureAPISecretWithFallback）。
+#   supervisor 提前生成只是为了让「两个子进程从一开始就同密钥」，
+#   并把密钥写进环境变量（子进程继承），避免各自生成的风险窗口。
+#
+# 并发安全：
+#   用 FileMode.CreateNew（等价于 O_EXCL）独占创建 —— 内核保证原子性。
+#   并发时只有一个进程写入成功，其他进程发现文件已存在 → 读文件里赢家的密钥。
+#   绝不能两个进程各生成一个（web 与 core 密钥不一致 → 内部调用全 401）。
+#
+# 返回 $null 表示生成失败（此时应由调用方报错退出，而不是用弱默认值兜底）。
+function Get-OrCreateApiSecret {
+    if ($env:PLCBRIDGE_API_SECRET) { return $env:PLCBRIDGE_API_SECRET }
+
+    if (Test-Path $ApiSecretFile) {
+        $existing = (Get-Content -Path $ApiSecretFile -Raw -ErrorAction SilentlyContinue)
+        if ($existing) { return $existing.Trim() }
+    }
+
+    # 生成 32 字节（256 bit）随机密钥，base64 编码后 44 字符。
+    try {
+        $bytes = New-Object 'System.Byte[]' 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $secret = [System.Convert]::ToBase64String($bytes)
+    } catch {
+        Write-Host "[supervisor] 生成 API 密钥失败: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+
+    try {
+        # CreateNew = 独占创建（O_EXCL）：文件已存在就抛异常，不会覆盖别人的密钥。
+        $fs = [System.IO.File]::Open($ApiSecretFile, [System.IO.FileMode]::CreateNew,
+                                     [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            # 结尾必须带换行 —— 它是"写入完成"的标记。
+            # Go 侧 secconfig.loadSecretFile 靠它判断文件是否已写完，
+            # 避免读到半截密钥（半截密钥长度也能通过强度检查，
+            # 会导致 web 与 core 缓存到不同密钥 → 内部调用全 401）。
+            $bytesOut = [System.Text.Encoding]::UTF8.GetBytes($secret + "`n")
+            $fs.Write($bytesOut, 0, $bytesOut.Length)
+        } finally {
+            $fs.Close()
+        }
+        Write-Host "[supervisor] 已生成 API 密钥: $ApiSecretFile" -ForegroundColor DarkGreen
+    } catch [System.IO.IOException] {
+        # 文件已存在（并发时另一个进程赢了）→ 读它的内容。
+        $existing = (Get-Content -Path $ApiSecretFile -Raw -ErrorAction SilentlyContinue)
+        if ($existing) {
+            Write-Host "[supervisor] API 密钥已由其它进程生成，复用: $ApiSecretFile" -ForegroundColor DarkYellow
+            return $existing.Trim()
+        }
+        Write-Host "[supervisor] 读 API 密钥文件失败: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    } catch {
+        Write-Host "[supervisor] 写 API 密钥文件失败: $($_.Exception.Message)" -ForegroundColor Red
+        return $null
+    }
+    return $secret
+}
 
 function Write-State {
     param([int]$W = 0, [int]$C = 0, [string]$Msg = 'ok', [string]$Status = 'running')
@@ -122,10 +194,19 @@ function Start-Detached {
         [string]$ExePath,
         [string]$ArgsString,
         [string]$StdoutLog,
-        [string]$StderrLog
+        [string]$StderrLog,
+        [string]$ApiSecret = ''
     )
     # Build: start "" "<exe>" <args> > <stdout> 2> <stderr>
     # Use cmd /c so the child inherits an environment + is fully detached.
+    #
+    # PLCBRIDGE_API_SECRET 不写进命令行，而是由 supervisor 进程自身持有
+    # （$env:PLCBRIDGE_API_SECRET），Start-Process 的子进程自动继承。
+    #
+    # 为什么不用 cmd 的 `set VAR=...&&` 前缀注入：
+    #   1. 引号地狱 —— 密钥里若含引号 / & / | 会破坏命令解析，甚至变成命令注入。
+    #   2. `cmd /c` 的命令行对同机其它进程可见（进程列表 / wmic），
+    #      密钥会泄露给无关进程；环境变量继承没有这个问题。
     $cmdLine = "cmd /c `"$ExePath`" $ArgsString > `"$StdoutLog`" 2> `"$StderrLog`""
     Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $cmdLine -WorkingDirectory $Root -WindowStyle Hidden
 }
@@ -144,7 +225,8 @@ function Start-Web {
         -ExePath $WebExe `
         -ArgsString "--config $ConfigDir --addr :8080" `
         -StdoutLog (Join-Path $LogDir 'plcbridge-web.out.log') `
-        -StderrLog (Join-Path $LogDir 'plcbridge-web.err.log')
+        -StderrLog (Join-Path $LogDir 'plcbridge-web.err.log') `
+        -ApiSecret $ApiSecret
     $deadline = (Get-Date).AddSeconds($WebStartupTimeoutSec)
     while ((Get-Date) -lt $deadline) {
         if (Test-Port 8080) {
@@ -169,7 +251,8 @@ function Start-Core {
         -ExePath $CoreExe `
         -ArgsString "--config $ConfigDir" `
         -StdoutLog (Join-Path $LogDir 'plcbridge.out.log') `
-        -StderrLog (Join-Path $LogDir 'plcbridge.err.log')
+        -StderrLog (Join-Path $LogDir 'plcbridge.err.log') `
+        -ApiSecret $ApiSecret
     Start-Sleep -Seconds 2
     if (Test-Port 9091) {
         Write-Host "[supervisor] plcbridge listening on :9091" -ForegroundColor Green
@@ -254,6 +337,22 @@ Set-Flag -Name 'pause_web'   -Value $false
 
 Write-Host "[supervisor] PlcBridge supervisor starting  Root=$Root  ConfigDir=$ConfigDir" -ForegroundColor Green
 Write-State -Status 'starting' -Msg 'initial boot'
+
+# === API 密钥（web / core 共享的 HMAC 签名密钥） ===
+# 缺失则生成并落盘到 <ConfigDir>/api.secret；生成失败直接退出，
+# 绝不用弱默认值兜底（弱密钥 = 全网可伪造的 Bearer Token）。
+$ApiSecret = Get-OrCreateApiSecret
+if (-not $ApiSecret) {
+    Write-Host "[supervisor] FATAL: 无法获取 API 密钥，拒绝启动两个进程" -ForegroundColor Red
+    Write-State -Status 'stopped' -Msg 'api secret unavailable'
+    exit 1
+}
+# 先记录来源（必须在写 $env: 之前判断，否则永远是 'env'）。
+$ApiSecretSource = if ($env:PLCBRIDGE_API_SECRET) { 'env' } else { 'file' }
+# 写进 supervisor 自身的环境 —— Start-Process 的子进程会自动继承。
+# web 与 core 因此共享同一密钥，且密钥不出现在任何命令行里。
+$env:PLCBRIDGE_API_SECRET = $ApiSecret
+Write-Host "[supervisor] API 密钥就绪 (source: $ApiSecretSource)" -ForegroundColor DarkGray
 
 Start-Web
 Start-Core

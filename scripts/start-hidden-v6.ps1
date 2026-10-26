@@ -1,4 +1,4 @@
-# PlcBridge hidden starter (v6: pure .NET, no Start-Process quirks).
+﻿# PlcBridge hidden starter (v6: pure .NET, no Start-Process quirks).
 #
 # Sets PLC_EXE, PLC_ARGS, PLC_CWD, PLC_OUT, PLC_ERR, then starts the
 # exe via [System.Diagnostics.Process] and disowns from this PS.
@@ -28,22 +28,27 @@ try {
     $argList = @($env:PLC_ARGS -split '\s+' | Where-Object { $_ -ne '' })
     $argsJoined = ($argList -join ' ')
 
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = $exe
-    # PS 5.1 / .NET Framework: no ArgumentList collection. Use Arguments string.
-    $psi.Arguments = $argsJoined
-    $psi.WorkingDirectory = $cwd
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow  = $true
-    $psi.WindowStyle     = 'Hidden'
-    if ($out) { $psi.RedirectStandardOutput = $out }
-    if ($err) { $psi.RedirectStandardError  = $err }
+    Dbg ("launch: " + $exe + " args=[" + $argsJoined + "] cwd=" + $cwd)
 
-    Dbg ("ProcessStartInfo: " + $exe + " args=[" + $argsJoined + "] cwd=" + $cwd)
+    # 关键：ProcessStartInfo.RedirectStandardOutput 是 **bool** 属性，不是路径。
+    # 直接赋值路径字符串只会把它置为 $true —— 管道开启但无人读取，
+    # 一旦 64KB 管道缓冲写满，子进程会被永久阻塞（现场表现为"服务假死"）。
+    # Start-Process -RedirectStandardOutput 走 CreateProcess 的文件句柄直传，
+    # 不经过管道，既不阻塞又能拿到真实子进程 PID（cmd /c 只会拿到 cmd 的 PID）。
+    $spArgs = @()
+    foreach ($a in $argList) { $spArgs += ('"' + $a + '"') }
 
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo = $psi
-    [void]$proc.Start()
+    $spParams = @{
+        FileName               = $exe
+        WorkingDirectory       = $cwd
+        WindowStyle            = 'Hidden'
+        PassThru               = $true
+    }
+    if ($spArgs.Count -gt 0) { $spParams['ArgumentList'] = $spArgs }
+    if ($out) { $spParams['RedirectStandardOutput'] = $out }
+    if ($err) { $spParams['RedirectStandardError'] = $err }
+
+    $proc = Start-Process @spParams
 
     Dbg ("Started PID=" + $proc.Id)
     [Console]::Out.WriteLine($proc.Id)

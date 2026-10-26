@@ -24,8 +24,8 @@ type Sampler struct {
 	outPath string
 	period  time.Duration
 
-	plcSnap  func() PlcSnapshot
-	metrics  func() (CollectDurSnapshot, error) // 暴露给外部注入（通常 = ScrapeCollectDuration）
+	plcSnap func() PlcSnapshot
+	metrics func() (CollectDurSnapshot, error) // 暴露给外部注入（通常 = ScrapeCollectDuration）
 
 	// runtime metrics
 	lastPauseNs atomic.Uint64
@@ -67,12 +67,12 @@ func NewSampler(outPath string, period time.Duration,
 		return nil, err
 	}
 	s := &Sampler{
-		outPath: outPath,
-		period:  period,
-		plcSnap: plcSnap,
-		metrics: metricsFn,
-		w:       w,
-		f:       f,
+		outPath:  outPath,
+		period:   period,
+		plcSnap:  plcSnap,
+		metrics:  metricsFn,
+		w:        w,
+		f:        f,
 		rowStart: time.Now(),
 	}
 	go s.loop()

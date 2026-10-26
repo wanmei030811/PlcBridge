@@ -1,6 +1,7 @@
 // regen-config reads the plcbridge SQLite db and exports its state to config.json.
 // Usage:
-//   regen-config <dbPath> [configDir]
+//
+//	regen-config <dbPath> [configDir]
 //
 // If configDir is omitted, it is derived from dbPath: strips the "data/plcbridge.db"
 // suffix, so the db's parent directory is used.

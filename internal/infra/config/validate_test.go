@@ -155,7 +155,7 @@ func TestValidate_SourceGlobalDuplicate(t *testing.T) {
 // TestValidate_PointInvalidDataType
 func TestValidate_PointInvalidDataType(t *testing.T) {
 	cfg := &platform.Config{
-		Version: 1,
+		Version:  1,
 		Channels: []*platform.Channel{{ChannelBizID: "c1", Role: "collect", Type: "s7", Address: "x"}},
 		Devices: []*platform.Device{
 			{DeviceBizID: "d1", Sources: []*platform.Source{{
@@ -173,7 +173,7 @@ func TestValidate_PointInvalidDataType(t *testing.T) {
 // TestValidate_PointEmptyAddress
 func TestValidate_PointEmptyAddress(t *testing.T) {
 	cfg := &platform.Config{
-		Version: 1,
+		Version:  1,
 		Channels: []*platform.Channel{{ChannelBizID: "c1", Role: "collect", Type: "s7", Address: "x"}},
 		Devices: []*platform.Device{
 			{DeviceBizID: "d1", Sources: []*platform.Source{{
@@ -336,10 +336,12 @@ type platformNotFoundErr struct{ msg string }
 func (e *platformNotFoundErr) Error() string { return e.msg }
 
 // TestValidate_AllDataTypesAccepted 验证所有合法 data_type 通过。
+//
+// Plan2 主题 A 3.1: 词汇表由 platform.AllDataTypes() 单一事实源接管。
 func TestValidate_AllDataTypesAccepted(t *testing.T) {
-	for dt := range validDataTypes {
+	for _, dt := range platform.AllDataTypes() {
 		cfg := &platform.Config{
-			Version: 1,
+			Version:  1,
 			Channels: []*platform.Channel{{ChannelBizID: "c1", Role: "collect", Type: "s7", Address: "x"}},
 			Devices: []*platform.Device{
 				{DeviceBizID: "d1", Sources: []*platform.Source{{

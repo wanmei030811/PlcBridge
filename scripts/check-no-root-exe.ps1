@@ -1,4 +1,4 @@
-# check-no-root-exe.ps1
+﻿# check-no-root-exe.ps1
 # 强约束：根目录不能出现 plcbridge.exe / plcbridge-web.exe（必须放 bin/）。
 # 退出码 0 = 通过；1 = 发现违规。
 # 用法：

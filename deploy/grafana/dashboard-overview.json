@@ -1,0 +1,122 @@
+{
+  "title": "plcbridge Overview",
+  "uid": "plcbridge-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "P99 采集延迟 (ms)",
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (le) (rate(plcbridge_collect_duration_seconds_bucket[5m]))) * 1000",
+        "legendFormat": "P99"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "采集错误率",
+      "targets": [{
+        "expr": "sum(rate(plcbridge_collect_total{result=\"error\"}[5m])) / clamp_min(sum(rate(plcbridge_collect_total[5m])), 0.001)",
+        "legendFormat": "err rate"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "回写失败率",
+      "targets": [{
+        "expr": "sum(rate(plcbridge_write_total{result=~\"fail|timeout\"}[5m])) / clamp_min(sum(rate(plcbridge_write_total[5m])), 0.001)",
+        "legendFormat": "write fail rate"
+      }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.10 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "type": "stat",
+      "title": "在线率",
+      "targets": [{
+        "expr": "sum(plcbridge_pool_running) / clamp_min(sum(plcbridge_pool_running) + sum(plcbridge_pool_rejected_total), 0.001)",
+        "legendFormat": "online"
+      }],
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "采集 P99 延迟 (ms)",
+      "targets": [{
+        "expr": "histogram_quantile(0.99, sum by (le) (rate(plcbridge_collect_duration_seconds_bucket[5m]))) * 1000",
+        "legendFormat": "P99"
+      }],
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Target 队列长度",
+      "targets": [{
+        "expr": "plcbridge_target_queue_length",
+        "legendFormat": "{{target_biz_id}}"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker 池运行任务数",
+      "targets": [{
+        "expr": "plcbridge_pool_running",
+        "legendFormat": "{{pool}}"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Worker 池拒绝速率 (/s)",
+      "targets": [{
+        "expr": "sum by (pool) (rate(plcbridge_pool_rejected_total[5m]))",
+        "legendFormat": "{{pool}}"
+      }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 }
+    }
+  ]
+}

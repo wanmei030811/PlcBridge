@@ -1,4 +1,4 @@
-# PlcBridge 实时监控 kill: 杀掉目标后立即列进程树, 找出真正的拉起源
+﻿# PlcBridge 实时监控 kill: 杀掉目标后立即列进程树, 找出真正的拉起源
 $ErrorActionPreference = 'Continue'
 
 function Kill([int]$pid, [string]$label) {

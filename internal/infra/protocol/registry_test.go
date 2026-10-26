@@ -46,7 +46,7 @@ func (f *fakeReconnectChannel) Write(_ context.Context, _ string, _ any, _ strin
 	return nil
 }
 func (f *fakeReconnectChannel) BatchWrite(_ context.Context, _ []WriteOp) error { return nil }
-func (f *fakeReconnectChannel) Connect(_ context.Context) error                  { return nil }
+func (f *fakeReconnectChannel) Connect(_ context.Context) error                 { return nil }
 
 // Reconnect 模拟"PLC 恢复"：清空 errNow，让后续 Read 成功。
 // 同时记录被调用次数，便于断言。
@@ -58,9 +58,9 @@ func (f *fakeReconnectChannel) Reconnect(_ context.Context) error {
 	f.lastUsedAt = time.Now()
 	return nil
 }
-func (f *fakeReconnectChannel) Disconnect() error                    { return nil }
-func (f *fakeReconnectChannel) HealthCheck(_ context.Context) error  { return nil }
-func (f *fakeReconnectChannel) IsConnected() bool                    { return true }
+func (f *fakeReconnectChannel) Disconnect() error                   { return nil }
+func (f *fakeReconnectChannel) HealthCheck(_ context.Context) error { return nil }
+func (f *fakeReconnectChannel) IsConnected() bool                   { return true }
 func (f *fakeReconnectChannel) ProbeActive(_ context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -189,14 +189,14 @@ func (p *panicStatsChannel) BatchRead(_ context.Context, _ []*platform.Point) (m
 func (p *panicStatsChannel) Write(_ context.Context, _ string, _ any, _ string) error { return nil }
 func (p *panicStatsChannel) BatchWrite(_ context.Context, _ []WriteOp) error          { return nil }
 func (p *panicStatsChannel) Connect(_ context.Context) error                          { return nil }
-func (p *panicStatsChannel) Reconnect(_ context.Context) error                       { return nil }
-func (p *panicStatsChannel) Disconnect() error                                       { return nil }
-func (p *panicStatsChannel) HealthCheck(_ context.Context) error                     { return nil }
-func (p *panicStatsChannel) IsConnected() bool                                       { return true }
-func (p *panicStatsChannel) ProbeActive(_ context.Context) error                     { return nil }
-func (p *panicStatsChannel) LastActiveAt() time.Time                                 { return time.Time{} }
-func (p *panicStatsChannel) LastError() string                                       { return "" }
-func (p *panicStatsChannel) LastErrorAt() time.Time                                  { return time.Time{} }
+func (p *panicStatsChannel) Reconnect(_ context.Context) error                        { return nil }
+func (p *panicStatsChannel) Disconnect() error                                        { return nil }
+func (p *panicStatsChannel) HealthCheck(_ context.Context) error                      { return nil }
+func (p *panicStatsChannel) IsConnected() bool                                        { return true }
+func (p *panicStatsChannel) ProbeActive(_ context.Context) error                      { return nil }
+func (p *panicStatsChannel) LastActiveAt() time.Time                                  { return time.Time{} }
+func (p *panicStatsChannel) LastError() string                                        { return "" }
+func (p *panicStatsChannel) LastErrorAt() time.Time                                   { return time.Time{} }
 func (p *panicStatsChannel) Stats() map[string]any {
 	// 模拟 driver bug：调用就 panic
 	panic("simulated driver bug in Stats()")
@@ -204,15 +204,15 @@ func (p *panicStatsChannel) Stats() map[string]any {
 
 // TestSnapshot_ReconnectOnPersistentError 验证：
 //
-//   1. 注入一个持续报错的 live channel（已在 entries）
-//   2. Snapshot 看到 lastErrAt 距 now > ProbeIdleThreshold → 调 Reconnect
-//   3. Reconnect 成功 → lastErr 清空 → status=ON
+//  1. 注入一个持续报错的 live channel（已在 entries）
+//  2. Snapshot 看到 lastErrAt 距 now > ProbeIdleThreshold → 调 Reconnect
+//  3. Reconnect 成功 → lastErr 清空 → status=ON
 func TestSnapshot_ReconnectOnPersistentError(t *testing.T) {
 	r := NewChannelRegistry()
 
 	cli := &fakeReconnectChannel{
-		bizID:    "S7",
-		errNow:   errors.New("simulated PLC down"),
+		bizID:      "S7",
+		errNow:     errors.New("simulated PLC down"),
 		lastUsedAt: time.Now().Add(-20 * time.Second), // 模拟 idle 20s
 	}
 	cli.lastErrAt = time.Now().Add(-20 * time.Second) // 错误也已 20s
@@ -243,13 +243,13 @@ func TestSnapshot_ReconnectOnPersistentError(t *testing.T) {
 
 // TestSnapshot_NoReconnectWhenFreshError 验证：
 //
-//   错误刚设（< ProbeIdleThreshold）时不应触发 Reconnect（避免打草惊蛇）。
+//	错误刚设（< ProbeIdleThreshold）时不应触发 Reconnect（避免打草惊蛇）。
 func TestSnapshot_NoReconnectWhenFreshError(t *testing.T) {
 	r := NewChannelRegistry()
 
 	cli := &fakeReconnectChannel{
-		bizID:    "S7",
-		errNow:   errors.New("transient error"),
+		bizID:      "S7",
+		errNow:     errors.New("transient error"),
 		lastUsedAt: time.Now().Add(-20 * time.Second),
 	}
 	cli.lastErrAt = time.Now() // 错误刚设
@@ -276,15 +276,15 @@ func TestSnapshot_NoReconnectWhenFreshError(t *testing.T) {
 // 这几个 substring 出现时，isHandlerDeadErr 必须返回 true。
 func TestIsHandlerDeadErr(t *testing.T) {
 	cases := []struct {
-		err   string
-		want  bool
+		err  string
+		want bool
 	}{
 		{"Connection to address 127.0.0.1:102 is null", true},
 		{"io: read/write on closed pipe", true},
 		{"use of closed network connection", true},
 		{"read tcp 127.0.0.1:102: connection reset by peer", true},
 		{"CONNECTION RESET BY PEER", true}, // 大小写不敏感
-		{"S7 channel S7 未连接", true},     // plcbridge 内部：client==nil
+		{"S7 channel S7 未连接", true},        // plcbridge 内部：client==nil
 		{"", false},
 		{"dial tcp 127.0.0.1:102: connectex: No connection could be made", false},
 		{"CPU : Address out of range", false},
@@ -304,8 +304,8 @@ func TestSnapshot_ReconnectOnHandlerDead(t *testing.T) {
 	r := NewChannelRegistry()
 
 	cli := &fakeReconnectChannel{
-		bizID:    "S7",
-		errNow:   errors.New("Connection to address 127.0.0.1:102 is null"),
+		bizID:      "S7",
+		errNow:     errors.New("Connection to address 127.0.0.1:102 is null"),
 		lastUsedAt: time.Now().Add(-1 * time.Second), // 刚有活动
 	}
 	cli.lastErrAt = time.Now() // 错误也刚设
@@ -332,8 +332,8 @@ func TestSnapshot_ReconnectThrottle(t *testing.T) {
 
 	// 错误是普通网络错误（非 handler 死亡）→ 走节流
 	cli := &fakeReconnectChannel{
-		bizID:    "S7",
-		errNow:   errors.New("dial tcp 127.0.0.1:102: connectex: No connection could be made"),
+		bizID:      "S7",
+		errNow:     errors.New("dial tcp 127.0.0.1:102: connectex: No connection could be made"),
 		lastUsedAt: time.Now().Add(-20 * time.Second),
 	}
 	// 错误 1s 前设 → now.Sub(errAt) = 1s > 500ms（ReconnectThrottle）→ 不应节流 → 应 Reconnect
@@ -364,4 +364,3 @@ func TestSnapshot_ReconnectThrottle(t *testing.T) {
 		t.Fatal("expected Reconnect to be called after throttle window passed")
 	}
 }
-

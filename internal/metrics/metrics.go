@@ -124,6 +124,52 @@ var (
 		[]string{"channel_biz_id"},
 	)
 
+	// === 协议特定指标（Plan2 主题 E 7.1）===
+	//
+	// 通用 collect_duration 掩盖了不同协议特征（OPC UA 有 Session 续期、ModbusTCP 有 RTT）。
+	// 以下指标按协议 driver 内部埋点，用于诊断特定协议的运行状态。
+	// 注意：当前实现未强制各 driver 埋点（保持 MVP 兼容），但 metrics 已在 registry 注册，
+	// 各 driver 后续 PR 按需调用 RecordS7ConnectDuration / RecordModbusRequestDuration 等。
+
+	// S7ConnectDurationSeconds S7 连接建立耗时（connect / reconnect）。
+	S7ConnectDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "plcbridge_s7_connect_duration_seconds",
+			Help:    "S7 协议 TCP 连接建立耗时（秒）",
+			Buckets: []float64{0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0},
+		},
+		[]string{"channel_biz_id"},
+	)
+
+	// OPCUASessionRenewTotal OPC UA Session 续期计数（成功 / 失败）。
+	OPCUASessionRenewTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "plcbridge_opcua_session_renew_total",
+			Help: "OPC UA Session 续期计数（result=success/fail）",
+		},
+		[]string{"channel_biz_id", "result"},
+	)
+
+	// ModbusRequestDurationSeconds Modbus 请求 RTT 耗时。
+	ModbusRequestDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "plcbridge_modbus_request_duration_seconds",
+			Help:    "Modbus TCP 单次请求 RTT（秒）",
+			Buckets: []float64{0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0},
+		},
+		[]string{"channel_biz_id", "func_code"},
+	)
+
+	// MQTTPublishDurationSeconds MQTT publish 耗时。
+	MQTTPublishDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "plcbridge_mqtt_publish_duration_seconds",
+			Help:    "MQTT publish 调用耗时（秒）",
+			Buckets: []float64{0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0},
+		},
+		[]string{"target_biz_id", "topic"},
+	)
+
 	registerOnce sync.Once
 )
 
@@ -143,6 +189,10 @@ func MustRegister() {
 			PoolRunning,
 			PoolRejectedTotal,
 			HeartbeatWriteFailTotal,
+			S7ConnectDurationSeconds,
+			OPCUASessionRenewTotal,
+			ModbusRequestDurationSeconds,
+			MQTTPublishDurationSeconds,
 		)
 	})
 }

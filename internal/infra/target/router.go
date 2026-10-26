@@ -45,7 +45,7 @@ func (r *Router) refresh() {
 			seen[tgt.TargetBizID] = true
 			if _, exists := r.queues[tgt.TargetBizID]; !exists {
 				size := 10000
-				r.queues[tgt.TargetBizID] = NewQueue(size)
+				r.queues[tgt.TargetBizID] = NewQueue(size, tgt.TargetBizID)
 				logging.Info(logging.EventTargetConnectOK).
 					Str("target", tgt.TargetBizID).
 					Int("queue_size", size).

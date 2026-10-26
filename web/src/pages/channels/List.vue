@@ -2,6 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount, reactive, watch } from 'vue'
 import { ElMessage, ElPopconfirm, type FormInstance, type FormRules } from 'element-plus'
 import { listChannels, createChannel, updateChannel, deleteChannel, getChannelsRuntime, type Channel, type ChannelRuntime } from '@/api/channels'
+import { listProtocols, type ProtocolInfo } from '@/api/protocols'
 import IconButton from '@/components/IconButton.vue'
 
 const items = ref<Channel[]>([])
@@ -10,6 +11,32 @@ const dialogOpen = ref(false)
 const editing = ref<Channel | null>(null)
 const formRef = ref<FormInstance>()
 const submitting = ref(false)
+
+// === 搜索 & 筛选 ===
+const searchKw = ref('')
+const roleFilter = ref<'all' | 'collect' | 'forward'>('all')
+
+const filteredItems = computed(() => {
+  let list = items.value
+  if (roleFilter.value !== 'all') {
+    list = list.filter(c => c.role === roleFilter.value)
+  }
+  const kw = searchKw.value.trim().toLowerCase()
+  if (kw) {
+    list = list.filter(c =>
+      c.channel_biz_id.toLowerCase().includes(kw) ||
+      c.address.toLowerCase().includes(kw) ||
+      c.type.toLowerCase().includes(kw)
+    )
+  }
+  return list
+})
+
+// Plan2 主题 A 3.4：协议 / Target 元信息（从 /api/v1/protocols 拉取，plugin init() 自注册驱动）。
+// collect / forward 是按 role 过滤的可用协议列表。
+const protocolsCollect = ref<ProtocolInfo[]>([])
+const protocolsForward = ref<ProtocolInfo[]>([])
+const protocolsLoaded = ref(false)
 
 // S7 专用：STRING 头字节数（与 form.config JSON 中的 string_layout 双向同步）
 //   null   = 未配置（后端默认 4 = 标准 S7 STRING）
@@ -55,11 +82,16 @@ const form = reactive({
   timeout_ms: 300
 })
 
-const TYPES_COLLECT = ['s7', 'modbus', 'opcua']
-const TYPES_FORWARD = ['mqtt', 'influxdb']
-const typeOptions = computed(() => form.role === 'collect' ? TYPES_COLLECT : TYPES_FORWARD)
+// typeOptions 按当前 role 动态返回已注册协议（Plan2 主题 A 3.4）。
+//
+// 取代硬编码 TYPES_COLLECT / TYPES_FORWARD 列表。加新协议 = plcbridge 端加 plugin + init()，
+// 前端无需改动（自动从 /api/v1/protocols 拉取）。
+const typeOptions = computed<ProtocolInfo[]>(() =>
+  form.role === 'collect' ? protocolsCollect.value : protocolsForward.value
+)
 const isS7 = computed(() => form.type === 's7')
 const isInfluxDB = computed(() => form.type === 'influxdb')
+const isModbusTcp = computed(() => form.type === 'modbus_tcp')
 
 /**
  * 协议 → 默认 JSON 模板 的映射。
@@ -120,7 +152,8 @@ function tipForConnected(c: Channel, rt: ChannelRuntime): string {
     if (c.type === 'opcua') {
       return `已连接 · ${stats['endpoint'] || c.address} · 订阅 ${stats['subscription_count'] || 0} 项 · 读 ${readCnt} · 写 ${writeCnt}${errCnt > 0 ? ` · 失败 ${errCnt}` : ''}`
     }
-    if (c.type === 'modbus') {
+    // Plan2 3.4: type 改为注册名 'modbus_tcp'；保留 'modbus' 向后兼容（历史 SQLite 数据）
+    if (c.type === 'modbus_tcp' || c.type === 'modbus') {
       return `已连接 · unit=${stats['unit_id']} · 读 ${readCnt} · 写 ${writeCnt}${errCnt > 0 ? ` · 失败 ${errCnt}` : ''} · 最近活动 ${formatAge(rt.last_active_ms)}`
     }
   }
@@ -316,9 +349,26 @@ async function onDelete(c: Channel) {
   }
 }
 
+// Plan2 主题 A 3.4：拉取已注册协议 / Target 元信息。
+//
+// 失败降级：保空数组 + 警告（不阻塞页面；老用户仍可手动输入 type 字段）。
+// 设计取舍：3.4 不在协议下拉框加 loading 骨架（数据几乎瞬时到达），仅失败时 ElMessage 提示。
+async function loadProtocols() {
+  try {
+    const r = await listProtocols()
+    protocolsCollect.value = r.collect ?? []
+    protocolsForward.value = r.forward ?? []
+    protocolsLoaded.value = true
+  } catch (e) {
+    ElMessage.warning('协议元信息拉取失败，表单下拉框可能为空（请检查 plcbridge 主进程）')
+    // 不 throw：让页面继续渲染
+  }
+}
+
 onMounted(() => {
   refresh()
   startRuntimePolling()
+  void loadProtocols()
 })
 
 onBeforeUnmount(stopRuntimePolling)
@@ -326,7 +376,7 @@ onBeforeUnmount(stopRuntimePolling)
 
 <template>
   <div>
-    <div style="display:flex; justify-content:space-between; margin-bottom:16px">
+    <div style="display:flex; justify-content:space-between; margin-bottom:16px; align-items:center">
       <h2 style="margin:0">通道（Channel）</h2>
       <div>
         <IconButton name="refresh" tip="刷新" :loading="loading" @click="refresh" />
@@ -334,7 +384,22 @@ onBeforeUnmount(stopRuntimePolling)
       </div>
     </div>
 
-    <el-table :data="items" v-loading="loading" stripe>
+    <!-- 搜索 + 筛选工具栏 -->
+    <div style="display:flex; gap:10px; margin-bottom:12px; align-items:center; flex-wrap:wrap">
+      <el-input v-model="searchKw" placeholder="搜索业务ID / 地址 / 协议" clearable style="width:260px" @input="">
+        <template #prefix><Icon name="search" :size="14" color="#94a3b8" /></template>
+      </el-input>
+      <el-radio-group v-model="roleFilter" size="small">
+        <el-radio-button value="all">全部</el-radio-button>
+        <el-radio-button value="collect">采集</el-radio-button>
+        <el-radio-button value="forward">转发</el-radio-button>
+      </el-radio-group>
+      <span style="font-size:12px; color:#909399; margin-left:4px">
+        {{ filteredItems.length }} / {{ items.length }}
+      </span>
+    </div>
+
+    <el-table :data="filteredItems" v-loading="loading" stripe>
       <el-table-column prop="channel_biz_id" label="业务 ID" width="160" />
       <el-table-column prop="role" label="角色" width="100">
         <template #default="{ row }">
@@ -385,7 +450,7 @@ onBeforeUnmount(stopRuntimePolling)
         </el-form-item>
         <el-form-item label="协议" prop="type">
           <el-select v-model="form.type" :disabled="!!editing">
-            <el-option v-for="t in typeOptions" :key="t" :label="t" :value="t" />
+            <el-option v-for="t in typeOptions" :key="t.name" :label="t.name" :value="t.name" />
           </el-select>
         </el-form-item>
         <el-form-item label="地址" prop="address">

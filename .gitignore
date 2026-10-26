@@ -27,10 +27,19 @@ config.json
 # Backups
 /backup/
 
+# 运行时生成的配置备份 zip (Web UI "备份" 按钮产生, 每次点一次多一个)
+# 这些是本地运行时产物, 体积大且含真实配置, 不应入库。
+/config/backups/
+
 # Web 依赖与构建产物
 web/node_modules/
 web/dist/
-internal/interface/web/dist/
+# 前端产物目录被 ignore，但必须保留一个占位文件：
+# internal/interface/web/embed.go 用 `//go:embed all:dist` 把产物编进二进制，
+# 若 dist/ 完全不存在，`go build` 会直接失败（pattern all:dist: no matching files found），
+# 导致干净克隆无法编译、CI 无法构建。
+internal/interface/web/dist/*
+!internal/interface/web/dist/.gitkeep
 
 # Go vendor / 临时文件 (项目目前未使用 vendor)
 vendor/
@@ -44,6 +53,10 @@ vendor/
 # SQLite 数据库与 WAL 模式临时文件 (开发环境数据,不入库)
 /config/data/
 
+# 第三方本地工具 (InfluxDB 1.8 二进制,约 145MB,不入库)
+# 重新获取：见 scripts/setup-influxdb.ps1
+/tools/
+
 # Supervisor 运行时状态 (flag/state,不入库)
 /config/runtime/
 
@@ -52,9 +65,34 @@ vendor/
 /config/web.bootstrap
 /config/web.hmac
 
+# API 签名密钥 (web/core 共享的 HMAC 密钥,supervisor 自动生成,绝不入库)
+/config/api.secret
+api.secret
+
 # TypeScript 编译缓存
 *.tsbuildinfo
 
 # 备份文件 (包括 *.bak / *.bak_xxx / *.bak 日期戳)
 *.bak
 *.bak_*
+
+# ===== 临时产物 / 冒烟测试目录 (绝不入库) =====
+#
+# 这些是开发期手工调试留下的散落文件，含 JWT、HMAC 密钥、SQLite 库、
+# 日志等敏感内容。历史上因为 .gitignore 没覆盖，`git add -A` 会把它们
+# 连同源码一起提交 —— token.txt / apitoken.txt 里是可直接复用的 Bearer token。
+#
+# 规则：
+#   /tmp_*.log        单个临时日志
+#   /tmp_*.py         临时 python 脚本
+#   /tmp_*.txt        临时文本输出
+#   /tmp_*            其它临时文件
+#   /tmp_smoke*/      冒烟测试目录（token / hmac / db / log）
+/tmp_*
+/tmp_smoke*/
+/tmp*/
+
+# 兜底：任何目录下的 .log / .pid / .sock（运行时产物）
+*.log
+*.pid
+*.sock

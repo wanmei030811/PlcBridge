@@ -28,6 +28,12 @@ func TestAllMetrics_HaveValidName(t *testing.T) {
 		"plcbridge_config_reload_total",
 		"plcbridge_pool_running",
 		"plcbridge_pool_rejected_total",
+		"plcbridge_heartbeat_write_fail_total",
+		// 协议特定指标（Plan2 主题 E 7.1）
+		"plcbridge_s7_connect_duration_seconds",
+		"plcbridge_opcua_session_renew_total",
+		"plcbridge_modbus_request_duration_seconds",
+		"plcbridge_mqtt_publish_duration_seconds",
 	}
 
 	for _, name := range names {
@@ -55,6 +61,12 @@ func getAllMetricNames() []string {
 		"plcbridge_config_reload_total",
 		"plcbridge_pool_running",
 		"plcbridge_pool_rejected_total",
+		"plcbridge_heartbeat_write_fail_total",
+		// 协议特定指标（Plan2 主题 E 7.1）
+		"plcbridge_s7_connect_duration_seconds",
+		"plcbridge_opcua_session_renew_total",
+		"plcbridge_modbus_request_duration_seconds",
+		"plcbridge_mqtt_publish_duration_seconds",
 	}
 }
 

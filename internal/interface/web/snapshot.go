@@ -90,17 +90,17 @@ func exportSnapshot(db *sql.DB, configDir string) gin.HandlerFunc {
 
 		cfg, err := buildExport(ctx, db)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if err := os.MkdirAll(configDir, 0o755); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		path := filepath.Join(configDir, "config.json")
 		tmp, err := os.CreateTemp(configDir, "config.json.tmp.*")
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		enc := json.NewEncoder(tmp)
@@ -108,16 +108,18 @@ func exportSnapshot(db *sql.DB, configDir string) gin.HandlerFunc {
 		if err := enc.Encode(cfg); err != nil {
 			tmp.Close()
 			os.Remove(tmp.Name())
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if err := tmp.Close(); err != nil {
 			os.Remove(tmp.Name())
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if err := os.Rename(tmp.Name(), path); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			// 修复:os.Rename 失败时也要清理临时文件（之前 3 个分支都清理就这里漏了）
+			_ = os.Remove(tmp.Name())
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		logging.Info(logging.EventConfigExport).
@@ -205,27 +207,54 @@ func buildExport(ctx context.Context, db *sql.DB) (exportedConfig, error) {
 		if err != nil {
 			return out, err
 		}
+		// 先把 sources 全部读进内存并关闭游标，再逐个查 points。
+		//
+		// 为什么不能嵌套：在 srows 游标还开着的时候再开 prows，
+		// 当连接池只有 1 条连接时会死锁（prows 等连接，连接被 srows 占着）。
+		// 生产配置 MaxOpenConns=8 时侥幸能过，但这是真实的连接池饥饿隐患，
+		// 且在单连接测试里必然复现。统一改成"读完即关"。
+		type srcRow struct {
+			SourceBizID       string
+			ChannelBizID      string
+			CollectEnabled    bool
+			WriteEnabled      bool
+			CollectIntervalMs int
+			TimeoutMs         int
+		}
+		var srcRows []srcRow
 		for srows.Next() {
-			var s exportedSource
-			if err := srows.Scan(&s.SourceBizID, &s.ChannelBizID, &s.CollectEnabled, &s.WriteEnabled,
-				&s.CollectIntervalMs, &s.TimeoutMs); err != nil {
+			var sr srcRow
+			if err := srows.Scan(&sr.SourceBizID, &sr.ChannelBizID, &sr.CollectEnabled, &sr.WriteEnabled,
+				&sr.CollectIntervalMs, &sr.TimeoutMs); err != nil {
 				srows.Close()
 				return out, err
 			}
-		prows, err := db.QueryContext(ctx, `
-			SELECT point_biz_id, name, address, data_type, collect_enabled, write_enabled,
-			       COALESCE(string_length,0)
-			FROM points WHERE source_id=(SELECT id FROM sources WHERE source_biz_id=?) ORDER BY id`,
-			s.SourceBizID)
-		if err != nil {
-			srows.Close()
-			return out, err
+			srcRows = append(srcRows, sr)
 		}
-		for prows.Next() {
-			var p exportedPoint
-			if err := prows.Scan(&p.PointBizID, &p.Name, &p.Address, &p.DataType, &p.CollectEnabled, &p.WriteEnabled, &p.StringLength); err != nil {
+		srows.Close()
+
+		for _, sr := range srcRows {
+			s := exportedSource{
+				SourceBizID:       sr.SourceBizID,
+				ChannelBizID:      sr.ChannelBizID,
+				CollectEnabled:    sr.CollectEnabled,
+				WriteEnabled:      sr.WriteEnabled,
+				CollectIntervalMs: sr.CollectIntervalMs,
+				TimeoutMs:         sr.TimeoutMs,
+				Points:            []exportedPoint{},
+			}
+			prows, err := db.QueryContext(ctx, `
+				SELECT point_biz_id, name, address, data_type, collect_enabled, write_enabled,
+				       COALESCE(string_length,0)
+				FROM points WHERE source_id=(SELECT id FROM sources WHERE source_biz_id=?) ORDER BY id`,
+				sr.SourceBizID)
+			if err != nil {
+				return out, err
+			}
+			for prows.Next() {
+				var p exportedPoint
+				if err := prows.Scan(&p.PointBizID, &p.Name, &p.Address, &p.DataType, &p.CollectEnabled, &p.WriteEnabled, &p.StringLength); err != nil {
 					prows.Close()
-					srows.Close()
 					return out, err
 				}
 				s.Points = append(s.Points, p)
@@ -233,7 +262,6 @@ func buildExport(ctx context.Context, db *sql.DB) (exportedConfig, error) {
 			prows.Close()
 			d.Sources = append(d.Sources, s)
 		}
-		srows.Close()
 
 		trows, err := db.QueryContext(ctx, `
 			SELECT target_biz_id, forward_channel_biz_id, COALESCE(topic,''),
@@ -241,21 +269,39 @@ func buildExport(ctx context.Context, db *sql.DB) (exportedConfig, error) {
 		if err != nil {
 			return out, err
 		}
+		// 同 sources：先读完并关闭游标，再查 target_points，避免嵌套游标占死连接。
+		type tgtRow struct {
+			TargetBizID         string
+			ForwardChannelBizID string
+			Topic               string
+			Format              string
+		}
+		var tgtRows []tgtRow
 		for trows.Next() {
-			var t exportedTarget
-			if err := trows.Scan(&t.TargetBizID, &t.ForwardChannelBizID, &t.Topic, &t.Format); err != nil {
+			var tr tgtRow
+			if err := trows.Scan(&tr.TargetBizID, &tr.ForwardChannelBizID, &tr.Topic, &tr.Format); err != nil {
 				trows.Close()
 				return out, err
 			}
-			pt, err1 := loadTargetPointBizIDs(ctx, db, t.TargetBizID)
+			tgtRows = append(tgtRows, tr)
+		}
+		trows.Close()
+
+		for _, tr := range tgtRows {
+			t := exportedTarget{
+				TargetBizID:         tr.TargetBizID,
+				ForwardChannelBizID: tr.ForwardChannelBizID,
+				Topic:               tr.Topic,
+				Format:              tr.Format,
+				PointBizIDs:         []string{},
+			}
+			pt, err1 := loadTargetPointBizIDs(ctx, db, tr.TargetBizID)
 			if err1 != nil {
-				trows.Close()
 				return out, err1
 			}
 			t.PointBizIDs = pt
 			d.Targets = append(d.Targets, t)
 		}
-		trows.Close()
 		out.Devices = append(out.Devices, d)
 	}
 

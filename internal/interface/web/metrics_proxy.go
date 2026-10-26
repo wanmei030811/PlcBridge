@@ -235,7 +235,8 @@ func parseMetricsSummary(text string) map[string]any {
 }
 
 // parseMetricLine 解析单行 prom 文本（counter/gauge）。
-//   "metric_name{label1="v1",label2="v2"} 123.45"
+//
+//	"metric_name{label1="v1",label2="v2"} 123.45"
 //
 // 返回 (name, labels, value, ok)。histogram 类的 _bucket/_sum/_count 也走同一接口。
 func parseMetricLine(line string) (name string, labels map[string]string, value float64, ok bool) {

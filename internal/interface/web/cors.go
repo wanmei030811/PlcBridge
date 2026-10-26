@@ -1,32 +1,27 @@
 package web
 
 import (
-	"net/http"
-
 	"github.com/gin-gonic/gin"
+
+	"github.com/plcbridge/plcbridge/internal/infra/httpx"
+	"github.com/plcbridge/plcbridge/internal/infra/secconfig"
 )
 
-// corsMiddleware 极简 CORS：
-//   - 默认同源部署：reflect 任意 Origin 并允许 credentials
-//   - 自动处理 OPTIONS 预检返回 204
-//   - 不限制 method / header（局域网运维工具场景）
+// corsMiddleware CORS 白名单中间件。
 //
-// 注意：生产环境若把 API 暴露公网，应在反代层（Nginx/Caddy）限制 Origin。
+// 与旧实现的关键差异（安全修复）：
+//
+//	旧：反射任意 Origin + Access-Control-Allow-Credentials: true
+//	    → 任意第三方网站都能带着用户的 session cookie 读写 PLC 配置
+//	    （读取点位数据 + 修改回写值），属于典型的 CSRF + 数据窃取。
+//
+//	新：默认不放行任何跨域（同源部署的最安全默认）；
+//	    只有 PLCBRIDGE_CORS_ORIGINS 白名单里的 Origin 才回 CORS 头。
+//
+// 常用环境变量：
+//
+//	PLCBRIDGE_CORS_ORIGINS=http://10.0.0.5:8080,https://ops.example.com
+//	PLCBRIDGE_CORS_ORIGINS=*    # 允许任意源，但不带凭证（浏览器规范要求）
 func corsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		origin := c.GetHeader("Origin")
-		if origin != "" {
-			c.Header("Access-Control-Allow-Origin", origin)
-			c.Header("Vary", "Origin")
-			c.Header("Access-Control-Allow-Credentials", "true")
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-			c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
-			c.Header("Access-Control-Max-Age", "86400")
-		}
-		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-		c.Next()
-	}
+	return httpx.CORS(secconfig.CORSOrigins())
 }

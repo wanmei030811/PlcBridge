@@ -51,16 +51,18 @@ func (f *fakeChannel) Write(_ context.Context, address string, value any, dataTy
 	return nil
 }
 func (f *fakeChannel) BatchWrite(_ context.Context, _ []protocol.WriteOp) error { return nil }
-func (f *fakeChannel) Connect(_ context.Context) error                         { return nil }
-func (f *fakeChannel) Reconnect(_ context.Context) error                      { return nil }
-func (f *fakeChannel) Disconnect() error                                       { return nil }
-func (f *fakeChannel) HealthCheck(_ context.Context) error                     { return nil }
-func (f *fakeChannel) IsConnected() bool                                       { return true }
-func (f *fakeChannel) ProbeActive(_ context.Context) error                     { return nil }
-func (f *fakeChannel) LastActiveAt() time.Time                                 { return time.Time{} }
-func (f *fakeChannel) LastError() string                                       { return "" }
-func (f *fakeChannel) LastErrorAt() time.Time                                  { return time.Time{} }
-func (f *fakeChannel) Stats() map[string]any                                   { return map[string]any{"connection_state": "Connected", "fake": true} }
+func (f *fakeChannel) Connect(_ context.Context) error                          { return nil }
+func (f *fakeChannel) Reconnect(_ context.Context) error                        { return nil }
+func (f *fakeChannel) Disconnect() error                                        { return nil }
+func (f *fakeChannel) HealthCheck(_ context.Context) error                      { return nil }
+func (f *fakeChannel) IsConnected() bool                                        { return true }
+func (f *fakeChannel) ProbeActive(_ context.Context) error                      { return nil }
+func (f *fakeChannel) LastActiveAt() time.Time                                  { return time.Time{} }
+func (f *fakeChannel) LastError() string                                        { return "" }
+func (f *fakeChannel) LastErrorAt() time.Time                                   { return time.Time{} }
+func (f *fakeChannel) Stats() map[string]any {
+	return map[string]any{"connection_state": "Connected", "fake": true}
+}
 
 // fakePlugin 实现 ProtocolPlugin，返回我们注入的 fakeChannel。
 type fakePlugin struct {
@@ -68,12 +70,13 @@ type fakePlugin struct {
 	cli  *fakeChannel
 }
 
-func (p *fakePlugin) Name() string                          { return p.name }
-func (p *fakePlugin) Version() string                       { return "test-1.0" }
-func (p *fakePlugin) ConfigSchema() json.RawMessage         { return nil }
-func (p *fakePlugin) ParseConfig(_ []byte) (any, error)     { return nil, nil }
-func (p *fakePlugin) Init(_ context.Context) error          { return nil }
-func (p *fakePlugin) Close() error                          { return nil }
+func (p *fakePlugin) Name() string                      { return p.name }
+func (p *fakePlugin) Version() string                   { return "test-1.0" }
+func (p *fakePlugin) ConfigSchema() json.RawMessage     { return nil }
+func (p *fakePlugin) ParseConfig(_ []byte) (any, error) { return nil, nil }
+func (p *fakePlugin) Init(_ context.Context) error      { return nil }
+func (p *fakePlugin) Close() error                      { return nil }
+func (p *fakePlugin) Capabilities() protocol.Capability { return protocol.Capability{} }
 func (p *fakePlugin) CreateChannel(_ *platform.Channel) (protocol.ProtocolChannel, error) {
 	return p.cli, nil
 }

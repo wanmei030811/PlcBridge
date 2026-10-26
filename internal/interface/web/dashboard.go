@@ -18,24 +18,24 @@ func dashboard(db *sql.DB) gin.HandlerFunc {
 		d := DashboardDTO{}
 		var err error
 		if d.Channels, err = store.ChannelCounts(ctx); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if d.Devices, err = store.DeviceCounts(ctx); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if d.Sources, err = store.SourceCounts(ctx); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		if d.Points, err = store.PointCounts(ctx); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		tcnt, err := store.TargetCount(ctx)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			WriteError(c, ErrInternal.With(err.Error()))
 			return
 		}
 		d.Targets = TargetStats{Total: tcnt}

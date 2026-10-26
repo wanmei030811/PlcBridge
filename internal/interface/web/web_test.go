@@ -17,12 +17,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+
+	_ "github.com/plcbridge/plcbridge/internal/infra/protocol/plugins" // 注册内置协议
+	_ "github.com/plcbridge/plcbridge/internal/infra/target/plugins"   // 注册内置 Target
 )
 
 func init() {
@@ -172,7 +176,7 @@ func TestChannels_CRUD(t *testing.T) {
 		"channel_biz_id": "ch-s7-1",
 		"role":           "collect",
 		"type":           "s7",
-		"address":         "192.168.1.10:102",
+		"address":        "192.168.1.10:102",
 		"config":         `{"rack":0,"slot":1}`,
 	}))
 	if w.Code != http.StatusCreated {
@@ -212,8 +216,8 @@ func TestChannels_CRUD(t *testing.T) {
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, authedReq(http.MethodPut, "/api/v1/channels/1", cookie, map[string]any{
 		"channel_biz_id": "ch-s7-1", "role": "collect", "type": "s7",
-		"address":   "192.168.1.11:102",
-		"config":    `{"rack":0,"slot":2}`,
+		"address":    "192.168.1.11:102",
+		"config":     `{"rack":0,"slot":2}`,
 		"queue_size": 5000,
 	}))
 	if w.Code != http.StatusOK {
@@ -317,10 +321,10 @@ func TestTokens_CreateListRevoke(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("create token status=%d body=%s", w.Code, w.Body.String())
 	}
-	var tk TokenDTO
+	var tk TokenCreated
 	decodeJSON(t, w, &tk)
-	if tk.Token == "" || tk.RevokedAt != nil {
-		t.Errorf("新 token 应有明文、未撤销: %+v", tk)
+	if tk.Token == "" {
+		t.Errorf("新 token 应返回明文: %+v", tk)
 	}
 
 	// List
@@ -570,16 +574,55 @@ func TestHMACKeyShortPanics(t *testing.T) {
 
 // TestMountSPA_AssetsAndFallback 验证：SPA 静态资源可访问、unknown GET 走 index.html、未知 /api/ 走 JSON 404。
 //
-// dist/ 已经在仓库里（vite build 产物），因此 embed FS 始终存在；这里直接挂 SPA 后断言。
+// 注意（2026-10-26）：本测试必须同时适配两种构建状态——
+//   - 本地/发布构建：dist/ 里有 vite 产物（index.html + assets/）→ 断言完整 SPA 行为
+//   - 干净克隆：CI 只跑 go build，从不跑 npm run build，dist/ 里只有 .gitkeep 占位
+//     → 此时 embed 里没有 index.html，MountSPA 走降级占位页，断言改查占位页
+//
+// 所以这里先探测 embed 里到底有没有产物，再决定断言哪一套行为。
 func TestMountSPA_AssetsAndFallback(t *testing.T) {
 	r := gin.New()
 	MountSPA(r)
 
-	// 0) 校验 embed FS 真的有内容（hash 经常变，按 glob 找一个即可）
+	// 0) 探测 embed FS 的实际状态
 	entries, err := fs.ReadDir(distFS, "dist/assets")
-	if err != nil {
-		t.Fatalf("read embed dist/assets: %v", err)
+	_ = err // assets 目录不存在（干净克隆）不算失败，下面按 index.html 是否存在分支
+	_, indexErr := fs.Stat(distFS, "dist/index.html")
+	hasIndex := indexErr == nil
+
+	if !hasIndex {
+		// ---- 干净克隆分支：占位页降级 ----
+		t.Log("embed 无 index.html（干净克隆状态），验证降级占位页")
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("降级态 GET / 应 200, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "前端资源未内嵌") {
+			t.Errorf("降级态 GET / 应返回占位页，body=%s", w.Body.String())
+		}
+
+		// 未知路径同样走占位页
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("降级态 SPA fallback GET /dashboard 应 200, got %d", w.Code)
+		}
+
+		// /api/ unknown → JSON 404（API 不受前端缺失影响）
+		w = httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/unknown", nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("降级态 GET /api/unknown 应 404 JSON, got %d body=%s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "api route not found") {
+			t.Errorf("降级态 /api/ fallback 应返回 JSON 'api route not found', got %s", w.Body.String())
+		}
+		return
 	}
+
+	// ---- 完整产物分支：断言完整 SPA 行为 ----
 	var jsAsset, cssAsset string
 	for _, e := range entries {
 		name := e.Name()
@@ -674,6 +717,70 @@ func TestMountSPA_AssetsAndFallback(t *testing.T) {
 	}
 }
 
+// TestMountSPA_FallbackWhenAssetsMissing 验证：前端产物缺失时走占位页降级，
+// 而不是 panic（2026-10-26 修复）。
+//
+// 背景：web 进程除了 UI，还提供配置/通道/设备/点位等全部核心 API。
+// 前端缺失只是「降级」，不该让进程退出——原来的 panic 会让 supervisor 无限重启，
+// 结果连 API 和健康检查一起不可用。
+//
+// 本测试直接调 mountFallbackSPA，不依赖 embed 的实际内容，因此在任何构建状态下都能跑。
+func TestMountSPA_FallbackWhenAssetsMissing(t *testing.T) {
+	r := gin.New()
+	mountFallbackSPA(r)
+
+	// 1) 根路径返回占位页（200，而不是 panic）
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("降级态 GET / 应 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "前端资源未内嵌") {
+		t.Errorf("降级态 GET / 应返回占位页，body=%s", w.Body.String())
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("降级态 GET / 应 text/html, got %q", w.Header().Get("Content-Type"))
+	}
+	// 占位页必须 no-store，否则修好前端后浏览器还拿旧占位页
+	if !strings.Contains(w.Header().Get("Cache-Control"), "no-store") {
+		t.Errorf("降级态 GET / 应带 no-store, got %q", w.Header().Get("Cache-Control"))
+	}
+
+	// 2) SPA fallback：未知路径也返回占位页
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dashboard", nil))
+	if w.Code != http.StatusOK {
+		t.Errorf("降级态 GET /dashboard 应 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "前端资源未内嵌") {
+		t.Errorf("降级态 SPA fallback 应返回占位页")
+	}
+
+	// 3) 静态资源 404（确实没有产物）
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("降级态 GET /assets/xxx.js 应 404, got %d", w.Code)
+	}
+
+	// 4) /api/unknown → JSON 404（API 语义不受前端缺失影响）
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/unknown", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("降级态 GET /api/unknown 应 404, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "api route not found") {
+		t.Errorf("降级态 /api/ fallback 应返回 JSON 'api route not found', got %s", w.Body.String())
+	}
+
+	// 5) 非 GET/HEAD/OPTIONS → 405 JSON
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/whatever", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("降级态 POST /whatever 应 405, got %d", w.Code)
+	}
+}
+
 // TestCreateChannel_RoleTypeValidation 测试 createChannel 的 role/type 校验：
 //   - role 非法 → 400
 //   - role 与 type 不匹配 → 400
@@ -690,7 +797,8 @@ func TestCreateChannel_RoleTypeValidation(t *testing.T) {
 		wantBad bool
 	}{
 		{"collect+s7 ok", "collect", "s7", false},
-		{"collect+modbus ok", "collect", "modbus", false},
+		{"collect+modbus ok（modbus 是 modbus_tcp 别名）", "collect", "modbus", false}, // Plan2 3.5：handler 入口归一化
+		{"collect+modbus_tcp ok", "collect", "modbus_tcp", false},
 		{"collect+opcua ok", "collect", "opcua", false},
 		{"forward+mqtt ok", "forward", "mqtt", false},
 		{"forward+influxdb ok", "forward", "influxdb", false},
@@ -719,6 +827,42 @@ func TestCreateChannel_RoleTypeValidation(t *testing.T) {
 	}
 }
 
+// TestUpdateChannel_TypeValidation 验证 updateChannel 也校验 type（bugfix）。
+//
+// 历史 bug：5.3 把 type 校验下沉后，updateChannel 漏了 type 检查，导致可通过
+// PUT 把 channel.type 改成 "made-up" 等未注册的协议名。
+func TestUpdateChannel_TypeValidation(t *testing.T) {
+	r, cleanup := newTestRouter(t)
+	defer cleanup()
+	cookie := loginAndCookie(t, r)
+
+	// 先建一个合法 channel
+	bizID := "ch_update_type_" + uuid.NewString()[:8]
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, authedReq(http.MethodPost, "/api/v1/channels", cookie, map[string]any{
+		"channel_biz_id": bizID, "role": "collect", "type": "s7", "address": "127.0.0.1:0",
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	var ch ChannelDTO
+	_ = json.Unmarshal(w.Body.Bytes(), &ch)
+
+	// 尝试把 type 改成未注册的 "made-up" → 应 400
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, authedReq(http.MethodPut, "/api/v1/channels/"+strconv.FormatInt(ch.ID, 10), cookie, map[string]any{
+		"channel_biz_id": bizID, "role": "collect", "type": "made-up", "address": "127.0.0.1:0",
+	}))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("update type 改成 made-up 应 400, got %d body=%s", w.Code, w.Body.String())
+	}
+	var body map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &body)
+	if body["code"] != "invalid_param" {
+		t.Errorf("code 应 invalid_param, got %v", body["code"])
+	}
+}
+
 // TestCreateSource_ChannelNotExist 测试引用不存在 channel_biz_id 时返回 400 而不是 500。
 func TestCreateSource_ChannelNotExist(t *testing.T) {
 	r, cleanup := newTestRouter(t)
@@ -728,18 +872,18 @@ func TestCreateSource_ChannelNotExist(t *testing.T) {
 	devID := createTestDevice(t, r, cookie, "dev_"+uuid.NewString()[:8], "test-device", true)
 
 	body := map[string]any{
-		"source_biz_id":      "src_" + uuid.NewString()[:8],
-		"device_id":          devID,
-		"channel_biz_id":     "nonexistent-channel",
-		"collect_enabled":    true,
-		"write_enabled":      false,
+		"source_biz_id":       "src_" + uuid.NewString()[:8],
+		"device_id":           devID,
+		"channel_biz_id":      "nonexistent-channel",
+		"collect_enabled":     true,
+		"write_enabled":       false,
 		"collect_interval_ms": 1000,
-		"timeout_ms":         300,
+		"timeout_ms":          300,
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, authedReq(http.MethodPost, "/api/v1/sources", cookie, body))
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("引用不存在 channel 应 400, got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Errorf("引用不存在 channel 应 404 (channel_not_found), got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
@@ -753,13 +897,13 @@ func TestCreateSource_ChannelRoleMismatch(t *testing.T) {
 	chID := createTestChannel(t, r, cookie, "ch_"+uuid.NewString()[:8], "forward", "mqtt", "127.0.0.1:1883")
 
 	body := map[string]any{
-		"source_biz_id":      "src_" + uuid.NewString()[:8],
-		"device_id":          devID,
-		"channel_biz_id":     chID,
-		"collect_enabled":    true,
-		"write_enabled":      false,
+		"source_biz_id":       "src_" + uuid.NewString()[:8],
+		"device_id":           devID,
+		"channel_biz_id":      chID,
+		"collect_enabled":     true,
+		"write_enabled":       false,
 		"collect_interval_ms": 1000,
-		"timeout_ms":         300,
+		"timeout_ms":          300,
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, authedReq(http.MethodPost, "/api/v1/sources", cookie, body))
@@ -809,6 +953,169 @@ func TestParseID_RejectsNonPositive(t *testing.T) {
 	}
 }
 
+// TestErrorResponse_BusinessValidation_UseCodeMsg 验证 Plan2 4.1：
+//
+//	业务校验错误（400/404/409）走 WriteError，响应体必须是 {code, msg} 结构。
+//	不查 data.error 字段（handleStoreErr 仍是旧格式，过渡期）。
+func TestErrorResponse_BusinessValidation_UseCodeMsg(t *testing.T) {
+	r, cleanup := newTestRouter(t)
+	defer cleanup()
+	cookie := loginAndCookie(t, r)
+
+	type expect struct {
+		name       string
+		method     string
+		path       string
+		body       any
+		wantStatus int
+		wantCode   string // 期望的 code 字段值，"" 表示只校验有 code 字段
+		noAuth     bool   // true = 不带 session cookie
+	}
+	cases := []expect{
+		{
+			name:       "create channel 缺字段 → invalid_param",
+			method:     http.MethodPost,
+			path:       "/api/v1/channels",
+			body:       map[string]any{"channel_biz_id": "ch-bad"},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:       "create channel role 非法 → invalid_param",
+			method:     http.MethodPost,
+			path:       "/api/v1/channels",
+			body:       map[string]any{"channel_biz_id": "x", "role": "weird", "type": "s7", "address": "1.1.1.1:0"},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:       "create channel type 未知 → invalid_param",
+			method:     http.MethodPost,
+			path:       "/api/v1/channels",
+			body:       map[string]any{"channel_biz_id": "x2", "role": "collect", "type": "made-up", "address": "1.1.1.1:0"},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:       "get channel/0 → invalid_param",
+			method:     http.MethodGet,
+			path:       "/api/v1/channels/0",
+			body:       nil,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:   "create source 引用不存在 channel → channel_not_found",
+			method: http.MethodPost,
+			path:   "/api/v1/sources",
+			body: map[string]any{
+				"source_biz_id": "src_" + uuid.NewString()[:8],
+				"device_id":     1, "channel_biz_id": "nonexistent-ch",
+			},
+			wantStatus: http.StatusNotFound,
+			wantCode:   "channel_not_found",
+		},
+		{
+			name:       "create device 缺 name → invalid_param",
+			method:     http.MethodPost,
+			path:       "/api/v1/devices",
+			body:       map[string]any{"device_biz_id": "d-x"},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:   "create point 未知 data_type → invalid_param",
+			method: http.MethodPost,
+			path:   "/api/v1/points",
+			body: map[string]any{
+				"point_biz_id": "pt_" + uuid.NewString()[:8], "source_id": 1,
+				"address": "DB1.0", "data_type": "unknown_type",
+			},
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "invalid_param",
+		},
+		{
+			name:       "未登录 → unauthorized",
+			method:     http.MethodGet,
+			path:       "/api/v1/channels",
+			body:       nil,
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "unauthorized",
+			noAuth:     true,
+		},
+		{
+			name:       "登录错密码 → invalid_credentials",
+			method:     http.MethodPost,
+			path:       "/api/v1/auth/login",
+			body:       map[string]string{"username": "admin", "password": "wrong"},
+			wantStatus: http.StatusUnauthorized,
+			wantCode:   "invalid_credentials",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			// 登录接口是公开的；其余接口都需要带 session cookie。
+			if c.path == "/api/v1/auth/login" || c.noAuth {
+				r.ServeHTTP(w, jsonReq(c.method, c.path, c.body))
+			} else {
+				r.ServeHTTP(w, authedReq(c.method, c.path, cookie, c.body))
+			}
+			if w.Code != c.wantStatus {
+				t.Fatalf("status: got %d, want %d (body=%s)", w.Code, c.wantStatus, w.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("body not JSON: %v (raw=%s)", err, w.Body.String())
+			}
+			code, ok := body["code"].(string)
+			if !ok || code == "" {
+				t.Errorf("response 缺少 code 字段: %s", w.Body.String())
+			}
+			if c.wantCode != "" && code != c.wantCode {
+				t.Errorf("code: got %q, want %q (body=%s)", code, c.wantCode, w.Body.String())
+			}
+			msg, ok := body["msg"].(string)
+			if !ok || msg == "" {
+				t.Errorf("response 缺少 msg 字段: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestErrorResponse_HandleStoreErr_AlsoUnified 验证 Plan2 4.3：
+//
+//	handleStoreErr 不再保留旧格式，全部走 {code, msg}。
+//	错误体系彻底统一，过渡期结束。
+func TestErrorResponse_HandleStoreErr_AlsoUnified(t *testing.T) {
+	r, cleanup := newTestRouter(t)
+	defer cleanup()
+	cookie := loginAndCookie(t, r)
+
+	// 触发 store 路径的 404：GET 不存在的 channel
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, authedReq(http.MethodGet, "/api/v1/channels/9999", cookie, nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GET 不存在 channel 应 404, got %d", w.Code)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	// 4.3 切换后：code=not_found, msg="资源不存在"（ErrAPINotFound 的默认文案）
+	if body["code"] != "not_found" {
+		t.Errorf("code: got %v, want not_found (body=%s)", body["code"], w.Body.String())
+	}
+	if msg, ok := body["msg"].(string); !ok || msg == "" {
+		t.Errorf("缺 msg 字段: %s", w.Body.String())
+	}
+	// 4.3 后：旧 error 字段不再有
+	if _, hasOld := body["error"]; hasOld {
+		t.Errorf("4.3 后响应体不应再含旧 error 字段: %s", w.Body.String())
+	}
+}
+
 // === 测试 helper（独立 uuid 后缀避免 UNIQUE 冲突）===
 
 func createTestDevice(t *testing.T, r http.Handler, cookie string, bizID, name string, enabled bool) int64 {
@@ -838,13 +1145,13 @@ func createTestChannel(t *testing.T, r http.Handler, cookie, bizID, role, typ, a
 func createTestSource(t *testing.T, r http.Handler, cookie, bizID string, devID int64, chBizID string) int64 {
 	t.Helper()
 	body := map[string]any{
-		"source_biz_id":      bizID,
-		"device_id":          devID,
-		"channel_biz_id":     chBizID,
-		"collect_enabled":    true,
-		"write_enabled":      false,
+		"source_biz_id":       bizID,
+		"device_id":           devID,
+		"channel_biz_id":      chBizID,
+		"collect_enabled":     true,
+		"write_enabled":       false,
 		"collect_interval_ms": 1000,
-		"timeout_ms":         300,
+		"timeout_ms":          300,
 	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, authedReq(http.MethodPost, "/api/v1/sources", cookie, body))

@@ -42,24 +42,25 @@ func (f *fakeChannelCounting) Disconnect() error {
 	return nil
 }
 func (f *fakeChannelCounting) HealthCheck(_ context.Context) error { return nil }
-func (f *fakeChannelCounting) IsConnected() bool                  { return f.healthy }
+func (f *fakeChannelCounting) IsConnected() bool                   { return f.healthy }
 func (f *fakeChannelCounting) ProbeActive(_ context.Context) error { return nil }
 func (f *fakeChannelCounting) LastActiveAt() time.Time             { return time.Now() }
-func (f *fakeChannelCounting) LastError() string                  { return "" }
+func (f *fakeChannelCounting) LastError() string                   { return "" }
 func (f *fakeChannelCounting) LastErrorAt() time.Time              { return time.Time{} }
-func (f *fakeChannelCounting) Stats() map[string]any              { return map[string]any{} }
+func (f *fakeChannelCounting) Stats() map[string]any               { return map[string]any{} }
 
 // fakePluginCounting 返回一个固定 bizID 的 fakeChannelCounting。
 type fakePluginCounting struct {
 	cli *fakeChannelCounting
 }
 
-func (p *fakePluginCounting) Name() string                  { return "fake" }
-func (p *fakePluginCounting) Version() string               { return "0.1" }
-func (p *fakePluginCounting) ConfigSchema() json.RawMessage { return nil }
+func (p *fakePluginCounting) Name() string                      { return "fake" }
+func (p *fakePluginCounting) Version() string                   { return "0.1" }
+func (p *fakePluginCounting) ConfigSchema() json.RawMessage     { return nil }
+func (p *fakePluginCounting) Capabilities() Capability          { return Capability{} }
 func (p *fakePluginCounting) ParseConfig(_ []byte) (any, error) { return nil, nil }
-func (p *fakePluginCounting) Init(_ context.Context) error  { return nil }
-func (p *fakePluginCounting) Close() error                  { return nil }
+func (p *fakePluginCounting) Init(_ context.Context) error      { return nil }
+func (p *fakePluginCounting) Close() error                      { return nil }
 func (p *fakePluginCounting) CreateChannel(_ *platform.Channel) (ProtocolChannel, error) {
 	return p.cli, nil
 }
@@ -203,12 +204,13 @@ type fakePluginFail struct {
 	shouldFail bool
 }
 
-func (p *fakePluginFail) Name() string                  { return "fake-fail" }
-func (p *fakePluginFail) Version() string               { return "0.1" }
-func (p *fakePluginFail) ConfigSchema() json.RawMessage { return nil }
+func (p *fakePluginFail) Name() string                      { return "fake-fail" }
+func (p *fakePluginFail) Version() string                   { return "0.1" }
+func (p *fakePluginFail) ConfigSchema() json.RawMessage     { return nil }
+func (p *fakePluginFail) Capabilities() Capability          { return Capability{} }
 func (p *fakePluginFail) ParseConfig(_ []byte) (any, error) { return nil, nil }
-func (p *fakePluginFail) Init(_ context.Context) error  { return nil }
-func (p *fakePluginFail) Close() error                  { return nil }
+func (p *fakePluginFail) Init(_ context.Context) error      { return nil }
+func (p *fakePluginFail) Close() error                      { return nil }
 func (p *fakePluginFail) CreateChannel(_ *platform.Channel) (ProtocolChannel, error) {
 	return &fakeChannelFailing{shouldFail: p.shouldFail}, nil
 }
@@ -251,5 +253,5 @@ func (f *fakeChannelFailing) LastError() string {
 	}
 	return ""
 }
-func (f *fakeChannelFailing) LastErrorAt() time.Time  { return time.Time{} }
-func (f *fakeChannelFailing) Stats() map[string]any   { return map[string]any{} }
+func (f *fakeChannelFailing) LastErrorAt() time.Time { return time.Time{} }
+func (f *fakeChannelFailing) Stats() map[string]any  { return map[string]any{} }

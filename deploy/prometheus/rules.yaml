@@ -1,0 +1,162 @@
+# Prometheus 告警规则（Plan2 主题 D 6.3）。
+#
+# 部署方式：Prometheus config.yaml 加
+#   rule_files:
+#     - /etc/prometheus/rules/plcbridge.yaml
+#
+# 阈值依据见 md/SLO.md。
+
+groups:
+  # === 采集链路 ===
+  - name: plcbridge.collect
+    interval: 30s
+    rules:
+      # 采集 P99 > 300ms 持续 5 分钟 → 警告（CPU/网络/PLC 侧慢）
+      - alert: PlcbridgeCollectP99High
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (
+              rate(plcbridge_collect_duration_seconds_bucket[5m])
+            )
+          ) > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          component: collect
+        annotations:
+          summary: "plcbridge 采集 P99 过高"
+          description: "近 5min 采集 P99 延迟 > 300ms (当前 {{ $value | humanizeDuration }})"
+
+      # 采集错误率 > 5% 持续 5 分钟 → 严重
+      #
+      # ⚠️ label 值必须与代码一致：
+      #   internal/app/collect/workers.go 用的是 result="fail" / "success"，
+      #   不是 "error"。写成 result="error" 这条告警永远不会触发（静默失效）。
+      - alert: PlcbridgeCollectErrorRateHigh
+        expr: |
+          sum(rate(plcbridge_collect_total{result="fail"}[5m]))
+          /
+          sum(rate(plcbridge_collect_total[5m]))
+          > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: collect
+        annotations:
+          summary: "plcbridge 采集错误率 > 5%"
+          description: "近 5min 采集错误率 {{ $value | humanizePercentage }}"
+
+  # === 转发链路 ===
+  - name: plcbridge.forward
+    interval: 30s
+    rules:
+      # Target 队列长度持续 > 80% 容量 5min → 警告（下游消费慢）
+      #
+      # ⚠️ 阈值必须是真实容量：
+      #   internal/infra/target/router.go 创建队列时 size = 10000，
+      #   所以 80% = 8000。原来写的 800（按 queue_size=1000 算的）
+      #   在真实容量下只占 8%，会长期误报"队列接近打满"。
+      - alert: PlcbridgeTargetQueueNearFull
+        expr: |
+          max(plcbridge_target_queue_length)
+          > 8000  # 队列容量 10000，留 20% 缓冲
+        for: 5m
+        labels:
+          severity: warning
+          component: forward
+        annotations:
+          summary: "plcbridge target 队列接近打满"
+          description: "target 队列长度 {{ $value }}，已超 80% 容量（10000），请检查下游消费"
+
+      # Target 丢消息速率 > 1/s 持续 1min → 严重
+      - alert: PlcbridgeTargetDroppedRate
+        expr: |
+          sum(rate(plcbridge_target_dropped_total[1m])) > 1
+        for: 1m
+        labels:
+          severity: critical
+          component: forward
+        annotations:
+          summary: "plcbridge target 正在丢消息"
+          description: "近 1min 丢弃 {{ $value }} 条消息/秒，可能下游宕机或网络问题"
+
+  # === 回写链路 ===
+  - name: plcbridge.write
+    interval: 30s
+    rules:
+      # 回写失败率 > 10% 持续 5min → 严重
+      - alert: PlcbridgeWriteFailRateHigh
+        expr: |
+          sum(rate(plcbridge_write_total{result=~"fail|timeout"}[5m]))
+          /
+          sum(rate(plcbridge_write_total[5m]))
+          > 0.10
+        for: 5m
+        labels:
+          severity: critical
+          component: write
+        annotations:
+          summary: "plcbridge 回写失败率 > 10%"
+          description: "近 5min 回写失败率 {{ $value | humanizePercentage }}"
+
+  # === 资源池 ===
+  - name: plcbridge.pool
+    interval: 15s
+    rules:
+      # pool rejected 速率 > 0.1/s 持续 5min → 警告（goroutine 池饱和）
+      - alert: PlcbridgePoolRejectedHigh
+        expr: |
+          sum by (pool) (rate(plcbridge_pool_rejected_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: pool
+        annotations:
+          summary: "plcbridge {{ $labels.pool }} 池被拒"
+          description: "近 5min {{ $labels.pool }} 池拒绝 {{ $value }} 任务/秒，需扩容或降负载"
+
+      # pool running 长期贴着池容量 → 即将开始拒绝（容量预警，比 rejected 更早）
+      - alert: PlcbridgePoolSaturated
+        expr: |
+          plcbridge_pool_running{pool="collectPool"} > 180
+          or plcbridge_pool_running{pool="forwardPool"} > 90
+          or plcbridge_pool_running{pool="writePool"} > 45
+        for: 5m
+        labels:
+          severity: warning
+          component: pool
+        annotations:
+          summary: "plcbridge {{ $labels.pool }} 池接近饱和"
+          description: "当前运行 {{ $value }} 个任务，接近池容量（collect=200/forward=100/write=50）"
+
+  # === 心跳 ===
+  - name: plcbridge.heartbeat
+    interval: 30s
+    rules:
+      # S7 心跳写失败 → PLC 侧可能已失联
+      - alert: PlcbridgeHeartbeatWriteFail
+        expr: |
+          sum by (channel_biz_id) (increase(plcbridge_heartbeat_write_fail_total[10m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+          component: heartbeat
+        annotations:
+          summary: "plcbridge 心跳写入失败（通道 {{ $labels.channel_biz_id }}）"
+          description: "近 10min 心跳写失败，PLC 连接可能异常"
+
+  # === 配置热加载 ===
+  - name: plcbridge.config
+    interval: 60s
+    rules:
+      # 配置 reload 失败
+      - alert: PlcbridgeConfigReloadFail
+        expr: |
+          increase(plcbridge_config_reload_total{trigger="error"}[10m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: config
+        annotations:
+          summary: "plcbridge 配置重载失败"
+          description: "近 10min 内配置重载失败，检查 config.json 合法性"

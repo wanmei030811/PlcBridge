@@ -2,22 +2,25 @@
 //
 // 设计前提：plcbridge-web 是被 scripts/supervisor.ps1 守护的。
 // 仪表盘点按钮 → 这里写一条控制消息到 runtime/control.pending.json（原子 rename 写入）
-//  → supervisor 每 3s 扫描该文件 → 执行对应动作 → 归档。
+//
+//	→ supervisor 每 3s 扫描该文件 → 执行对应动作 → 归档。
 //
 // 为什么不在 web 端直接 Stop-Process？
-//   1) web 自己停止自己后再启动别人需要外部进程介入；
-//   2) 进程崩溃后自动重启也是 supervisor 的活；
-//   3) 解耦：web 只发指令，不持有任何 PID 句柄。
+//  1. web 自己停止自己后再启动别人需要外部进程介入；
+//  2. 进程崩溃后自动重启也是 supervisor 的活；
+//  3. 解耦：web 只发指令，不持有任何 PID 句柄。
 //
 // 关于"重载配置"：
-//   plcbridge 进程通过 fsnotify 监听 configDir/config.json 变更并自动 reload。
-//   因此"重载"= 重新写一次 config.json（哪怕内容不变），plcbridge 会重新解析全量。
-//   这条逻辑 web 端直接做即可，不走 supervisor。
+//
+//	plcbridge 进程通过 fsnotify 监听 configDir/config.json 变更并自动 reload。
+//	因此"重载"= 重新写一次 config.json（哪怕内容不变），plcbridge 会重新解析全量。
+//	这条逻辑 web 端直接做即可，不走 supervisor。
 //
 // 关于"重启 plcbridge-web"：
-//   web 写一条 {action: "restart_plcbridge-web"}，再异步 graceful shutdown 自己。
-//   supervisor 看到 web 退出 → 自动拉新 web。
-//   若 supervisor 不在 → web 退出后需用户手动拉起，dashboard 会有 503 提示。
+//
+//	web 写一条 {action: "restart_plcbridge-web"}，再异步 graceful shutdown 自己。
+//	supervisor 看到 web 退出 → 自动拉新 web。
+//	若 supervisor 不在 → web 退出后需用户手动拉起，dashboard 会有 503 提示。
 package web
 
 import (
@@ -49,9 +52,9 @@ func ProcessSelfShutdownCh() <-chan struct{} { return processSelfShutdownCh }
 const flagsFile = "supervisor.flags.json"
 
 type supervisorFlags struct {
-	PauseCore  bool   `json:"pause_core"`
-	PauseWeb   bool   `json:"pause_web"`
-	UpdatedAt  string `json:"updated_at"`
+	PauseCore bool   `json:"pause_core"`
+	PauseWeb  bool   `json:"pause_web"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // writeFlags 原子写 supervisor flags 文件（merge 已有字段）。
@@ -170,9 +173,9 @@ type processControlResponse struct {
 // isSupervisorRunning 检查 supervisor 是否在跑。
 //
 // 判定规则:
-//   1. state 文件不存在 → 一定没在跑
-//   2. status 字段为 "stopped" / "stopping" → 一定没在跑（即使 mtime 很近）
-//   3. 否则要求 mtime < 10s —— supervisor 心跳每 3s 写一次 state，超过 10s 没写就是僵死
+//  1. state 文件不存在 → 一定没在跑
+//  2. status 字段为 "stopped" / "stopping" → 一定没在跑（即使 mtime 很近）
+//  3. 否则要求 mtime < 10s —— supervisor 心跳每 3s 写一次 state，超过 10s 没写就是僵死
 func isSupervisorRunning(runtimeDir string) bool {
 	p := filepath.Join(runtimeDir, supervisorStateFile)
 	fi, err := os.Stat(p)
@@ -230,11 +233,11 @@ func processControlHandler(db *sql.DB, configDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req processControlRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json body: " + err.Error()})
+			WriteError(c, ErrInvalidParam.With("invalid json body: "+err.Error()))
 			return
 		}
 		if req.Action == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "action is required"})
+			WriteError(c, ErrInvalidParam.With("action is required"))
 			return
 		}
 
@@ -248,7 +251,7 @@ func processControlHandler(db *sql.DB, configDir string) gin.HandlerFunc {
 			"stop_supervisor":       true,
 		}
 		if !allowed[req.Action] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "unknown action: " + req.Action})
+			WriteError(c, ErrInvalidParam.With("unknown action: "+req.Action))
 			return
 		}
 
@@ -259,7 +262,7 @@ func processControlHandler(db *sql.DB, configDir string) gin.HandlerFunc {
 		case "reload_config":
 			// 直接复用 exportSnapshot 的内部 buildExport 流程：
 			// buildExport → tmp file → rename → fsnotify 触发 plcbridge reload。
-			if err := reloadConfigViaExport(db, configDir); err != nil {
+			if err := reloadConfigViaExport(c.Request.Context(), db, configDir); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"ok":      false,
 					"action":  req.Action,
@@ -278,7 +281,7 @@ func processControlHandler(db *sql.DB, configDir string) gin.HandlerFunc {
 
 		case "export_config":
 			// 仅导出快照到 configDir/config.json，plcbridge 会通过 fsnotify 自动热重载。
-			if err := reloadConfigViaExport(db, configDir); err != nil {
+			if err := reloadConfigViaExport(c.Request.Context(), db, configDir); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{
 					"ok":      false,
 					"action":  req.Action,
@@ -390,8 +393,11 @@ func supervisorStatusHandler(configDir string) gin.HandlerFunc {
 // reloadConfigViaExport 把 SQLite 状态导出到 configDir/config.json。
 //
 // 与 exportSnapshot 共享 buildExport + 原子写逻辑。
-func reloadConfigViaExport(db *sql.DB, configDir string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+//
+// ctx 由调用方传入：手动导出用请求 ctx（客户端断开则取消），
+// 自动导出用自己的超时 ctx（不能绑在 HTTP 请求上 —— 请求早结束了，导出还要继续）。
+func reloadConfigViaExport(ctx context.Context, db *sql.DB, configDir string) error {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	cfg, err := buildExport(ctx, db)
 	if err != nil {

@@ -39,8 +39,17 @@ export interface PlcbridgeSummary {
   collect_avg_ms: number
 }
 
-export function fetchWebHealth() { return apiGet<WebHealth>('/health') }
-export function fetchPlcbridgeSummary() { return apiGet<PlcbridgeSummary>('/plcbridge/metrics/summary') }
+export function fetchWebHealth() { return apiGet<WebHealth>('/health', { suppressGlobalError: true }) }
+
+/**
+ * plcbridge 主进程指标摘要。
+ *
+ * suppressGlobalError：仪表盘每 1s 轮询，失败时调用方只更新 liveError 文案
+ * （页面已有错误展示区），不需要再弹一次全局提示。
+ */
+export function fetchPlcbridgeSummary() {
+  return apiGet<PlcbridgeSummary>('/plcbridge/metrics/summary', { suppressGlobalError: true })
+}
 
 // ============ 进程控制（仪表盘启停面板） ============
 
@@ -79,5 +88,6 @@ export function postProcessControl(action: ProcessAction, reason = '') {
   return apiPost<ProcessControlResp>('/process/control', { action, reason })
 }
 export function fetchSupervisorStatus() {
-  return apiGet<SupervisorStatusResp>('/process/supervisor')
+  // supervisor 状态每 3s 轮询，失败时静默置空（页面显示"未运行"），不弹错误。
+  return apiGet<SupervisorStatusResp>('/process/supervisor', { suppressGlobalError: true })
 }

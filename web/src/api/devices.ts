@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut, apiDelete, ListResp } from './client'
+import type { AxiosProgressEvent } from 'axios'
 
 export interface Source {
   id: number
@@ -70,3 +71,79 @@ export function listSourcePoints(sourceId: number) { return apiGet<ListResp<Poin
 export function createPoint(p: Partial<Point>) { return apiPost<Point>('/points', p) }
 export function updatePoint(id: number, p: Partial<Point>) { return apiPut<Point>(`/points/${id}`, p) }
 export function deletePoint(id: number) { return apiDelete<{ ok: boolean }>(`/points/${id}`) }
+
+// === CSV 导入/导出（Plan3 3.1） ===
+
+export interface ImportResult {
+  imported: number
+  failed: number
+  skipped: number
+  errors: ImportError[]
+}
+export interface ImportError {
+  row: number
+  field: string
+  message: string
+}
+
+/**
+ * 导入点位 CSV。
+ * @param sourceBizId 目标 Source 的 biz_id
+ * @param csv CSV 文件或纯文本内容
+ * @param onProgress 上传进度回调
+ */
+export function importPoints(sourceBizId: string, csv: File | string) {
+  const isFile = csv instanceof File
+  if (isFile) {
+    const fd = new FormData()
+    fd.append('file', csv)
+    fd.append('source_biz_id', sourceBizId)
+    return apiPost<ImportResult>('/points/import', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  }
+  // 纯文本
+  return apiPost<ImportResult>('/points/import', { source_biz_id: sourceBizId, text: csv })
+}
+
+/**
+ * 导出点位 CSV（返回下载 URL）。
+ * @param params 筛选参数：source_biz_id / device_biz_id / channel_biz_id 三选一
+ */
+export function exportPointsUrl(params: { source_biz_id?: string; device_biz_id?: string; channel_biz_id?: string }) {
+  const base = '/api/v1'
+  const q = new URLSearchParams()
+  if (params.source_biz_id) q.set('source_biz_id', params.source_biz_id)
+  if (params.device_biz_id) q.set('device_biz_id', params.device_biz_id)
+  if (params.channel_biz_id) q.set('channel_biz_id', params.channel_biz_id)
+  return `${base}/points/export?${q}`
+}
+
+/** 触发 CSV 文件下载（自动带 Cookie 鉴权）。 */
+export async function downloadFile(url: string, filename: string) {
+  const resp = await fetch(url, { credentials: 'include' })
+  if (!resp.ok) throw new Error(`下载失败: ${resp.status}`)
+  const blob = await resp.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(a.href)
+}
+
+// === 设备克隆（Plan3 3.7） ===
+
+export interface CloneRequest {
+  new_device_biz_id: string
+  new_device_name?: string
+  biz_id_prefix?: string
+}
+export interface CloneResult {
+  device: Device
+  cloned: { sources: number; points: number; targets: number }
+}
+
+/** 克隆设备（深拷贝 Source/Point/Target）。 */
+export function cloneDevice(id: number, req: CloneRequest) {
+  return apiPost<CloneResult>(`/devices/${id}/clone`, req)
+}

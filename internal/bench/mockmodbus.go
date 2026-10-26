@@ -74,12 +74,13 @@ func (m *MockPLC) acceptLoop() {
 // handle 处理一个 Modbus TCP 连接。
 //
 // MBAP header:
-//   [0..1] Transaction ID
-//   [2..3] Protocol ID (0x0000)
-//   [4..5] Length (uint16 big endian) = 1(unit) + 1(fc) + N(data)
-//   [6]   Unit ID
-//   [7]   Function Code
-//   [8..] Data
+//
+//	[0..1] Transaction ID
+//	[2..3] Protocol ID (0x0000)
+//	[4..5] Length (uint16 big endian) = 1(unit) + 1(fc) + N(data)
+//	[6]   Unit ID
+//	[7]   Function Code
+//	[8..] Data
 func (m *MockPLC) handle(conn net.Conn) {
 	defer conn.Close()
 	for {
@@ -109,7 +110,8 @@ func (m *MockPLC) handle(conn net.Conn) {
 		// Length = len(resp)（resp 已包含 unit+fc+body）
 		out := make([]byte, 6+len(resp))
 		copy(out[0:2], hdr[0:2]) // echo TID
-		out[2] = 0; out[3] = 0   // PID=0
+		out[2] = 0
+		out[3] = 0 // PID=0
 		binary.BigEndian.PutUint16(out[4:6], uint16(len(resp)))
 		copy(out[6:], resp)
 		if _, err := conn.Write(out); err != nil {

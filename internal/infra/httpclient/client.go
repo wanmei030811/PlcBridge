@@ -52,9 +52,9 @@ func New(timeout time.Duration, opts ...Option) *Client {
 			Timeout:   defaultDialTimeout,
 			KeepAlive: defaultKeepAlive,
 		}).DialContext,
-		MaxIdleConns:        defaultMaxIdleConns,
-		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
-		IdleConnTimeout:     defaultIdleConnTimeout,
+		MaxIdleConns:          defaultMaxIdleConns,
+		MaxIdleConnsPerHost:   defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:       defaultIdleConnTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}

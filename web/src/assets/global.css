@@ -1,0 +1,243 @@
+/**
+ * PlcBridge 全局样式 & 深色模式变量
+ * useDark 会往 <html class="dark"> 切换，CSS 变量全部基于 .dark 作用域
+ */
+
+/* ===== Element Plus 深色覆盖 ===== */
+:root {
+  /* 主色 */
+  --el-color-primary: #10b981;
+  --el-color-primary-light-3: #34d399;
+  --el-color-primary-light-5: #6ee7b7;
+  --el-color-primary-light-7: #a7f3d0;
+  --el-color-primary-light-8: #d1fae5;
+  --el-color-primary-light-9: #ecfdf5;
+  --el-color-primary-dark-2: #059669;
+
+  /* 文字 */
+  --el-text-color-primary: #111827;
+  --el-text-color-regular: #374151;
+  --el-text-color-secondary: #6b7280;
+  --el-text-color-placeholder: #9ca3af;
+  --el-text-color-disabled: #d1d5db;
+
+  /* 边框 */
+  --el-border-color: #e5e7eb;
+  --el-border-color-light: #f3f4f6;
+  --el-border-color-lighter: #f9fafb;
+  --el-border-color-extra-light: #fafafa;
+  --el-border-color-dark: #d1d5db;
+  --el-border-color-darker: #9ca3af;
+
+  /* 背景 */
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f2f3f5;
+  --el-bg-color-overlay: #ffffff;
+
+  /* 填充 */
+  --el-fill-color: #f3f4f6;
+  --el-fill-color-light: #f9fafb;
+  --el-fill-color-lighter: #fafafa;
+  --el-fill-color-extra-light: #fafbfc;
+  --el-fill-color-dark: #e5e7eb;
+  --el-fill-color-darker: #d1d5db;
+  --el-fill-color-blank: #ffffff;
+
+  /* 阴影 */
+  --el-box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --el-box-shadow-light: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --el-box-shadow-lighter: 0 0 0 1px rgb(0 0 0 / 0.05);
+  --el-box-shadow-dark: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+
+  /* 距离 */
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+  --el-border-radius-round: 999px;
+  --el-border-radius-circle: 50%;
+
+  /* 背景色 */
+  --app-bg: #f3f5f9;
+  --app-header-bg: #ffffff;
+  --app-header-border: #e5e7eb;
+
+  /* 表格/卡片 */
+  --card-bg: #ffffff;
+  --card-border: #f0f0f0;
+  --table-header-bg: #fafafa;
+  --table-row-hover: #f9fafb;
+}
+
+/* ===== 深色模式 ===== */
+.dark {
+  --el-color-primary: #34d399;
+  --el-color-primary-light-3: #10b981;
+  --el-color-primary-light-5: #059669;
+  --el-color-primary-light-7: #047857;
+  --el-color-primary-light-8: #065f46;
+  --el-color-primary-light-9: #064e3b;
+  --el-color-primary-dark-2: #6ee7b7;
+
+  --el-text-color-primary: #f1f5f9;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-text-color-placeholder: #64748b;
+  --el-text-color-disabled: #475569;
+
+  --el-border-color: #334155;
+  --el-border-color-light: #1e293b;
+  --el-border-color-lighter: #1a2436;
+  --el-border-color-extra-light: #0f172a;
+  --el-border-color-dark: #475569;
+  --el-border-color-darker: #64748b;
+
+  --el-bg-color: #1e293b;
+  --el-bg-color-page: #0f172a;
+  --el-bg-color-overlay: #1e293b;
+
+  --el-fill-color: #334155;
+  --el-fill-color-light: #1e293b;
+  --el-fill-color-lighter: #1a2436;
+  --el-fill-color-extra-light: #0f172a;
+  --el-fill-color-dark: #475569;
+  --el-fill-color-darker: #64748b;
+  --el-fill-color-blank: #1e293b;
+
+  --el-box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.4), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+  --el-box-shadow-light: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --el-box-shadow-lighter: 0 0 0 1px rgb(0 0 0 / 0.2);
+  --el-box-shadow-dark: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+
+  /* 应用层 */
+  --app-bg: #0f172a;
+  --app-header-bg: #1e293b;
+  --app-header-border: #334155;
+
+  --card-bg: #1e293b;
+  --card-border: #334155;
+  --table-header-bg: #0f172a;
+  --table-row-hover: #1a2436;
+}
+
+/* ===== 通用深色适配 ===== */
+.dark body,
+.dark #app {
+  background-color: #0f172a;
+  color: #f1f5f9;
+}
+
+/* Element Plus 深色导航/下拉遮罩 */
+.dark .el-menu {
+  background-color: transparent;
+  border-color: #334155;
+}
+.dark .el-menu-item,
+.dark .el-sub-menu__title {
+  color: #cbd5e1;
+}
+.dark .el-menu-item:hover,
+.dark .el-sub-menu__title:hover {
+  background-color: rgba(255,255,255,0.05);
+}
+.dark .el-menu-item.is-active {
+  color: #34d399;
+}
+.dark .el-select-dropdown,
+.dark .el-popper.is-dark,
+.dark .el-dropdown-menu {
+  background: #1e293b;
+  border-color: #334155;
+}
+.dark .el-popper.is-light,
+.dark .el-dropdown-menu__item {
+  color: #cbd5e1;
+}
+.dark .el-dropdown-menu__item:hover {
+  background: rgba(52, 211, 153, 0.1);
+  color: #34d399;
+}
+
+/* 输入框深色 */
+.dark .el-input__wrapper {
+  background-color: #1e293b;
+  box-shadow: 0 0 0 1px #334155 inset;
+}
+.dark .el-input__inner {
+  color: #f1f5f9;
+}
+.dark .el-input__wrapper:hover {
+  box-shadow: 0 0 0 1px #475569 inset;
+}
+.dark .el-input__wrapper.is-focus {
+  box-shadow: 0 0 0 1px #34d399 inset;
+}
+
+/* 表格深色 */
+.dark .el-table {
+  --el-table-border-color: #334155;
+  --el-table-header-bg-color: #0f172a;
+  --el-table-tr-bg-color: #1e293b;
+  --el-table-row-hover-bg-color: #1a2436;
+  --el-table-text-color: #cbd5e1;
+  --el-table-header-text-color: #94a3b8;
+}
+.dark .el-table th.el-table__cell {
+  background-color: #0f172a;
+  color: #94a3b8;
+}
+
+/* 标签/徽章深色 */
+.dark .el-tag {
+  --el-tag-bg-color: rgba(52, 211, 153, 0.12);
+  --el-tag-border-color: rgba(52, 211, 153, 0.3);
+  --el-tag-text-color: #34d399;
+}
+
+/* 弹窗/对话框深色 */
+.dark .el-dialog {
+  background: #1e293b;
+  border: 1px solid #334155;
+}
+.dark .el-dialog__header {
+  border-bottom: 1px solid #334155;
+}
+.dark .el-dialog__title {
+  color: #f1f5f9;
+}
+.dark .el-dialog__body {
+  color: #cbd5e1;
+}
+.dark .el-overlay {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+/* 按钮深色 */
+.dark .el-button--primary {
+  --el-button-bg-color: #10b981;
+  --el-button-border-color: #10b981;
+  --el-button-hover-bg-color: #34d399;
+  --el-button-hover-border-color: #34d399;
+  --el-button-active-bg-color: #059669;
+  --el-button-active-border-color: #059669;
+}
+
+/* 卡片深色 */
+.dark .el-card {
+  background: #1e293b;
+  border-color: #334155;
+  color: #cbd5e1;
+}
+
+/* 分页深色 */
+.dark .el-pagination {
+  --el-pagination-bg-color: #1e293b;
+  --el-pagination-text-color: #94a3b8;
+  --el-pagination-button-bg-color: #1e293b;
+  --el-pagination-hover-color: #34d399;
+}
+
+/* 消息提示 */
+.dark .el-message {
+  --el-message-bg-color: #1e293b;
+  --el-message-border-color: #334155;
+  --el-message-text-color: #cbd5e1;
+}

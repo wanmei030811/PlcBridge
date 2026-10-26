@@ -15,11 +15,14 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/plcbridge/plcbridge/internal/infra/swagger"
 
 	_ "modernc.org/sqlite"
 )
@@ -159,6 +162,26 @@ func Migrate(db *sql.DB) error {
 			created_at INTEGER NOT NULL,
 			revoked_at INTEGER
 		)`,
+
+		// Plan3 3.3: 配置快照历史（每次保存自动创建快照，最多保留 50 个）
+		`CREATE TABLE IF NOT EXISTS config_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			description TEXT NOT NULL,
+			config_json TEXT NOT NULL,
+			created_by TEXT NOT NULL DEFAULT 'system',
+			record_count INTEGER NOT NULL DEFAULT 0,
+			is_auto INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL
+		)`,
+
+		// Web 控制台运行时设置（key-value）。
+		// 注意：这里存的是"Web 自身的行为开关"（如自动导出），
+		// 刻意不放 config.json —— 那个文件是 plcbridge 的热重载触发源。
+		`CREATE TABLE IF NOT EXISTS web_settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
@@ -282,9 +305,31 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, configDir string, sess *SessionSt
 
 	r.POST("/api/v1/auth/login", loginHandler(db, sess))
 
+	// Plan3 3.9：Swagger UI + OpenAPI spec（公开）。
+	//
+	// 为什么 web 端也要挂一份：前端导航栏的「API 文档」指向 /swagger/，
+	// 而用户访问的是 web 端（:8080），不是核心进程（:8082）。
+	// 之前只有核心进程挂了 Swagger → 点导航栏的「API 文档」会落到 SPA fallback，
+	// 打开的是前端首页而不是 API 文档。
+	//
+	// spec 由 api 包 go:embed 内嵌，两端吐的是同一份契约，不会漂移。
+	r.GET("/swagger", func(c *gin.Context) { c.Redirect(http.StatusMovedPermanently, "/swagger/") })
+	r.GET("/swagger/*any", gin.WrapH(swagger.Handler()))
+	r.GET("/api/openapi.yaml", gin.WrapH(swagger.OpenAPIHandler()))
+
 	// 需要登录的 API
+	store := NewStore(db)
 	auth := r.Group("/api/v1")
 	auth.Use(RequireSession(sess))
+	// Plan3 3.3：配置变更后自动创建快照。
+	// 只在写操作（POST/PUT/DELETE）且响应 2xx 时触发，失败仅记日志不影响主流程。
+	auth.Use(store.autoSnapshotMiddleware())
+	// 自动导出 config.json（开关默认关闭，见 settings.go SettingAutoExportConfig）。
+	//
+	// 放在 snapshot 中间件**之后**注册 → 快照先建，导出后触发；
+	// 两者的路径判定完全一致（isConfigMutatingPath），不会互相干扰。
+	exporter := newAutoExporter(db, configDir)
+	auth.Use(store.autoExportTriggerMiddleware(exporter))
 	{
 		auth.POST("/auth/logout", logoutHandler(sess))
 		auth.GET("/auth/me", meHandler(db))
@@ -303,16 +348,33 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, configDir string, sess *SessionSt
 		auth.DELETE("/devices/:id", deleteDevice(db))
 		auth.GET("/devices/:id/sources", listDeviceSources(db))
 
+		// Plan3 §3.7：设备克隆（深拷贝 Device + Sources + Points + Targets）
+		auth.POST("/devices/:id/clone", store.cloneDeviceHandler())
+
 		auth.POST("/sources", createSource(db))
 		auth.GET("/sources/:id", getSource(db))
 		auth.PUT("/sources/:id", updateSource(db))
 		auth.DELETE("/sources/:id", deleteSource(db))
 		auth.GET("/sources/:id/points", listSourcePoints(db))
 
+		// Plan3 3.2：实时点位值代理到 plcbridge :8082（实时值只在主进程内存里）。
+		// :id 装的是 source_biz_id / device_biz_id，不是 SQLite 行号（与下方 diag/history 同理）。
+		auth.GET("/sources/:id/values", sourceValuesProxyHandler())
+		auth.GET("/devices/:id/values", deviceValuesProxyHandler())
+
+		// 回写代理到 plcbridge :8082（write worker 只存在于主进程）。
+		// 此前 web 没注册这两个路由 → 前端「批量写入」按钮必然报"接口不存在"。
+		auth.POST("/write", writeProxyHandler())
+		auth.POST("/write/batch", writeProxyHandler())
+
 		auth.POST("/points", createPoint(db))
 		auth.GET("/points/:id", getPoint(db))
 		auth.PUT("/points/:id", updatePoint(db))
 		auth.DELETE("/points/:id", deletePoint(db))
+
+		// Plan3 §3.1：点位批量导入 / 导出（CSV）
+		auth.POST("/points/import", store.importPointsHandler())
+		auth.GET("/points/export", store.exportPointsHandler())
 
 		auth.GET("/targets", listTargets(db))
 		auth.POST("/targets", createTarget(db))
@@ -321,14 +383,49 @@ func RegisterRoutes(r *gin.Engine, db *sql.DB, configDir string, sess *SessionSt
 		auth.DELETE("/targets/:id", deleteTarget(db))
 		auth.PUT("/targets/:id/points", setTargetPoints(db))
 
+		// Plan3 3.4 / 3.5：Target 运行态（诊断 + 历史趋势）代理到 plcbridge :8082。
+		// 这两个能力只存在于主进程内存（forward.Workers 的 client cache），
+		// web 进程只有 SQLite 配置，拿不到运行态，必须跨进程代理。
+		//
+		// 路径参数复用 :id（装的是 target_biz_id，不是行号）——
+		// gin 不允许同一路径段用不同名的通配符。
+		auth.GET("/targets/diag", targetsDiagProxyHandler())
+		auth.GET("/targets/:id/diag", targetDiagProxyHandler())
+		auth.GET("/targets/:id/history", targetHistoryProxyHandler())
+
 		auth.GET("/tokens", listTokens(db))
 		auth.POST("/tokens", createToken(db))
 		auth.DELETE("/tokens/:id", revokeToken(db))
 
 		auth.GET("/dashboard", dashboard(db))
 		auth.POST("/snapshot", exportSnapshot(db, configDir))
+
+		// 配置脏状态：前端顶栏「导出配置」按钮靠它显示"有未导出的改动"角标。
+		auth.GET("/config/status", configStatusHandler(db, configDir))
+
+		// === Web 控制台运行时设置 ===
+		auth.GET("/settings", store.listSettingsHandler())
+		auth.PUT("/settings/:key", store.updateSettingHandler())
+
+		// === 配置备份 / 恢复（Plan2 新增）===
+		auth.GET("/config/backup/info", store.backupInfoHandler(configDir))
+		auth.GET("/config/backups", store.listBackupHandler(configDir))
+		auth.POST("/config/backup", store.exportBackupHandler(configDir))
+		auth.POST("/config/restore", store.restoreBackupHandler(configDir))
+		auth.GET("/config/backup/:filename", store.downloadBackupHandler(configDir))
+
+		// === 配置变更历史与回滚（Plan3 3.3）===
+		auth.GET("/config/snapshots", store.listSnapshotsHandler())
+		auth.POST("/config/snapshots", store.createSnapshotHandler())
+		auth.GET("/config/snapshots/:id", store.getSnapshotHandler())
+		auth.DELETE("/config/snapshots/:id", store.deleteSnapshotHandler())
+		auth.GET("/config/snapshots/:id/diff", store.diffSnapshotHandler())
+		auth.POST("/config/snapshots/:id/rollback", store.rollbackSnapshotHandler(configDir))
+
 		auth.GET("/plcbridge/metrics/summary", metricsSummaryHandler())
 		auth.GET("/plcbridge/channels/runtime", channelsRuntimeHandler())
+		// Plan2 主题 A 3.4：插件元信息代理（plcbridge :8082 /api/v1/protocols → 透传 + 缓存）
+		auth.GET("/protocols", protocolsProxyHandler())
 
 		// 进程控制（仪表盘启停 plcbridge / 重载配置 / 重启 web）
 		auth.POST("/process/control", processControlHandler(db, configDir))

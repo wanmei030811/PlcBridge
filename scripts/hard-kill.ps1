@@ -1,4 +1,4 @@
-# PlcBridge hard-kill via WMI (cross-session safe).
+﻿# PlcBridge hard-kill via WMI (cross-session safe).
 # WMI Win32_Process.Terminate() RPC runs at SYSTEM level -- no session isolation.
 
 $ErrorActionPreference = 'Continue'
@@ -45,6 +45,10 @@ Kill-ByName 'plcbridge'
 Kill-ByName 'plcbridge-web'
 
 Write-Host ""
+Write-Host "[2b] WMI Terminate influxd (InfluxDB 1.8, 历史趋势依赖)..." -ForegroundColor Yellow
+Kill-ByName 'influxd'
+
+Write-Host ""
 Write-Host "[3] WMI Terminate supervisor (powershell 含 supervisor)..." -ForegroundColor Yellow
 Kill-Supervisor
 
@@ -52,13 +56,14 @@ Write-Host ""
 Write-Host "[4] 兜底 taskkill /F (同会话)..." -ForegroundColor Yellow
 & taskkill.exe /IM plcbridge.exe /F 2>&1 | Out-Null
 & taskkill.exe /IM plcbridge-web.exe /F 2>&1 | Out-Null
+& taskkill.exe /IM influxd.exe /F 2>&1 | Out-Null
 
 Start-Sleep -Seconds 3
 
 Write-Host ""
 Write-Host "[5] 残留确认:" -ForegroundColor Yellow
 Write-Host "  进程:"
-$left = Get-Process -Name plcbridge,plcbridge-web -ErrorAction SilentlyContinue
+$left = Get-Process -Name plcbridge,plcbridge-web,influxd -ErrorAction SilentlyContinue
 if ($left) { $left | Format-Table Id,Name | Out-String | Write-Host }
 else { Write-Host "    (无)" -ForegroundColor Green }
 
@@ -71,8 +76,8 @@ if ($supLeft) {
     Write-Host "  supervisor: (无)" -ForegroundColor Green
 }
 
-Write-Host "  端口 8080/9091 LISTENING:"
-$conns = netstat -ano | Select-String "LISTENING" | Select-String ":8080|:9091"
+Write-Host "  端口 8080/8082/8086/9091 LISTENING:"
+$conns = netstat -ano | Select-String "LISTENING" | Select-String ":8080|:8082|:8086|:9091"
 if ($conns) { $conns | ForEach-Object { Write-Host ("    " + $_.Line) } }
 else { Write-Host "    (无)" -ForegroundColor Green }
 

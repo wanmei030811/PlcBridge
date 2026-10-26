@@ -1,9 +1,9 @@
 // Package pool 实现 plcbridge 单进程内的 4 个 worker 池。
 //
 // 设计原则（参考 Plan.md §6.2.2）：
-//   1. 池间物理隔离：4 个独立 goroutine 池，跨池通信只走 channel
-//   2. 每个池独立 context，互不传染超时
-//   3. 任务级非阻塞：池满时调用方立即收到 ErrPoolBusy，不排队阻塞
+//  1. 池间物理隔离：4 个独立 goroutine 池，跨池通信只走 channel
+//  2. 每个池独立 context，互不传染超时
+//  3. 任务级非阻塞：池满时调用方立即收到 ErrPoolBusy，不排队阻塞
 package pool
 
 import (
@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
+	"github.com/plcbridge/plcbridge/internal/metrics"
 )
 
 // ErrPoolBusy 池满时返回，调用方应立即放弃（fail-fast）。
@@ -188,6 +189,7 @@ func (p *WorkerPool) Submit(ctx context.Context, name string, run func(context.C
 		return nil
 	default:
 		p.rejected.Add(1)
+		metrics.PoolRejectedTotal.WithLabelValues(p.name).Inc()
 		logging.Warn(logging.EventServiceStart).
 			Str("pool", p.name).
 			Str("task", name).
@@ -207,6 +209,7 @@ func (p *WorkerPool) SubmitBlocking(ctx context.Context, name string, run func(c
 		return nil
 	case <-timer.C:
 		p.rejected.Add(1)
+		metrics.PoolRejectedTotal.WithLabelValues(p.name).Inc()
 		logging.Warn(logging.EventServiceStart).
 			Str("pool", p.name).
 			Str("task", name).
@@ -236,9 +239,11 @@ func (p *WorkerPool) dispatch(id int) {
 		case task := <-p.tasks:
 			p.sem <- struct{}{}
 			p.running.Add(1)
+			metrics.PoolRunning.WithLabelValues(p.name).Set(float64(p.running.Load()))
 			p.run(task, id)
 			<-p.sem
 			p.running.Add(-1)
+			metrics.PoolRunning.WithLabelValues(p.name).Set(float64(p.running.Load()))
 		}
 	}
 }

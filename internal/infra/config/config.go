@@ -1,10 +1,10 @@
 // Package config 实现 plcbridge 配置热加载（fsnotify L1 + mtime L2）。
 //
 // 设计要点（参考 Plan.md §6.6）：
-//   1. Web 后台写 SQLite → 导出 config.json 到平台配置目录
-//   2. plcbridge 通过 fsnotify 监听文件变更（L1）+ mtime 轮询兜底（L2）
-//   3. atomic.Pointer 原子替换内存缓存，业务无中断
-//   4. 跨平台路径探测（Linux /etc/plcbridge/  Windows %PROGRAMDATA%\plcbridge\）
+//  1. Web 后台写 SQLite → 导出 config.json 到平台配置目录
+//  2. plcbridge 通过 fsnotify 监听文件变更（L1）+ mtime 轮询兜底（L2）
+//  3. atomic.Pointer 原子替换内存缓存，业务无中断
+//  4. 跨平台路径探测（Linux /etc/plcbridge/  Windows %PROGRAMDATA%\plcbridge\）
 //
 // 本包仅负责配置加载与热更新，不定义领域模型（领域模型在 platform 包）。
 package config
@@ -21,6 +21,7 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/plcbridge/plcbridge/internal/infra/logging"
+	"github.com/plcbridge/plcbridge/internal/metrics"
 	"github.com/plcbridge/plcbridge/internal/platform"
 )
 
@@ -51,7 +52,7 @@ func LoadWithRetry(dir string, interval time.Duration) (*platform.Config, error)
 	tmp := NewStore(dir)
 	deadline := time.Now().Add(60 * time.Second) // 最多等 60 秒
 	for {
-		cfg, err := tmp.TryLoad()
+		cfg, err := tmp.tryLoad("initial")
 		if err == nil {
 			return cfg, nil
 		}
@@ -68,22 +69,41 @@ func LoadWithRetry(dir string, interval time.Duration) (*platform.Config, error)
 
 // TryLoad 尝试加载一次（不重试）。
 func (s *Store) TryLoad() (*platform.Config, error) {
+	return s.tryLoad("manual")
+}
+
+// tryLoad 加载配置并上报 Prometheus 指标。
+//
+// trigger 参数说明（对应 metrics.ConfigReloadTotal 的 label）：
+//   - "initial"  启动时首次加载
+//   - "fsnotify" 文件事件触发（热加载主路径）
+//   - "mtime"    L2 轮询兜底触发
+//   - "manual"   显式调用（测试 / 运维手动触发）
+//   - "error"    加载失败
+//
+// 为什么单独一层：TryLoad 是公开 API，测试与调用方都直接用它，
+// 不应该为了埋点而改签名（会破坏调用方与测试）。
+func (s *Store) tryLoad(trigger string) (*platform.Config, error) {
 	path := filepath.Join(s.dir, "config.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			metrics.ConfigReloadTotal.WithLabelValues("not_found").Inc()
 			return nil, ErrConfigNotFound
 		}
+		metrics.ConfigReloadTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
 
 	var cfg platform.Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
+		metrics.ConfigReloadTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("解析 config.json 失败: %w", err)
 	}
 
 	// 业务校验（Phase 1.4：完整校验替代原基础 validate）
 	if err := Validate(&cfg); err != nil {
+		metrics.ConfigReloadTotal.WithLabelValues("error").Inc()
 		return nil, fmt.Errorf("config.json 业务校验失败: %w", err)
 	}
 
@@ -93,6 +113,8 @@ func (s *Store) TryLoad() (*platform.Config, error) {
 	cfg.Version = int(s.gen.Add(1))
 
 	s.current.Store(&cfg)
+	metrics.ConfigReloadTotal.WithLabelValues(trigger).Inc()
+	metrics.ConfigVersion.Set(float64(cfg.Version))
 	logging.Info(logging.EventConfigReload).
 		Str("path", path).
 		Int("version", cfg.Version).
@@ -161,7 +183,7 @@ func (s *Store) watchFsnotify(ctx context.Context) {
 				debounceTimer.Stop()
 			}
 			debounceTimer = time.AfterFunc(debounceMs*time.Millisecond, func() {
-				if _, err := s.TryLoad(); err != nil {
+				if _, err := s.tryLoad("fsnotify"); err != nil {
 					logging.Error(logging.EventConfigReloadFail).Err(err).Msg("热加载 config.json 失败")
 				}
 			})
@@ -196,7 +218,7 @@ func (s *Store) watchMtime(ctx context.Context) {
 			}
 			if mt.After(lastMtime) {
 				lastMtime = mt
-				if _, err := s.TryLoad(); err != nil {
+				if _, err := s.tryLoad("mtime"); err != nil {
 					logging.Error(logging.EventConfigReloadFail).Err(err).Msg("L2 mtime 热加载失败")
 				}
 			}
