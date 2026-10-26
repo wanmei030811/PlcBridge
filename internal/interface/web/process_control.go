@@ -30,9 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -87,6 +85,7 @@ func writeFlags(runtimeDir string, patch func(*supervisorFlags)) error {
 
 // startSupervisorIfMissing —— dashboard 点"启动 supervisor" 时：若已在线则忽略；
 // 否则在 detached 进程里启动 scripts\supervisor.ps1（避免 web 端阻塞）。
+//
 // 注意：Windows 下 supervisor 用 PowerShell，必须新窗口启动（不能 Wait，否则 web 卡死）。
 //
 // 参数说明：
@@ -96,6 +95,19 @@ func writeFlags(runtimeDir string, patch func(*supervisorFlags)) error {
 // 历史 BUG：之前把 configDir 当作 projectRoot 拼路径，导致 dashboard"启动 supervisor"按钮
 // 始终找不到 scripts/supervisor.ps1，从未真正工作过 —— 用户点按钮其实是 no-op。
 // 修完后：脚本路径用 projectRoot，runtime/state 文件路径仍用 configDir/runtime。
+//
+// 平台差异（2026-10-26 修）：
+//
+//	  supervisor 本身是 PowerShell 脚本（scripts/supervisor.ps1），只在 Windows 上有意义。
+//	  但 syscall.SysProcAttr.HideWindow 是 **Windows 专属字段**，
+//	  写在平台无关文件里会让 Linux 交叉编译直接失败：
+//
+//		process_control.go:116:41: unknown field HideWindow in struct literal of type syscall.SysProcAttr
+//
+//	  （这个阻断项在本地 Windows 开发机上永远看不到，只有 CI 的 Linux 构建才会暴露。）
+//
+//	  修法：公共逻辑留在本文件（跨平台），"如何拉起 detached 进程"下沉到
+//	  supervisor_start_windows.go / supervisor_start_other.go，由构建标签选择。
 func startSupervisorIfMissing(configDir string) error {
 	rt := filepath.Join(configDir, "runtime")
 	if isSupervisorRunning(rt) {
@@ -106,15 +118,9 @@ func startSupervisorIfMissing(configDir string) error {
 	if _, err := os.Stat(psScript); err != nil {
 		return fmt.Errorf("supervisor script not found: %s", err)
 	}
-	// 用 cmd.exe /c start /B 启动 powershell，让其 detached（web 不阻塞）。
 	// 显式传 -ConfigDir 让 supervisor 把 state 写到 web 端 runtime 所在目录，
 	// 否则 supervisor 默认 <Root>/config/runtim（生产部署 configDir 在别处时会找不到）。
-	configDirArg := configDir
-	cmd := exec.Command("cmd.exe", "/c", "start", "/B",
-		"powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-		"-File", psScript, "-Root", projectRoot, "-ConfigDir", configDirArg)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Start()
+	return launchSupervisorDetached(projectRoot, psScript, configDir)
 }
 
 // detectProjectRoot 从 configDir 反推项目根目录。
