@@ -316,7 +316,9 @@ func (c *opcuaChannel) EnableSubscription(onChange ValueChangeFunc) error {
 	c.onChange = onChange
 	c.subEnabled = true
 
-	go c.dispatchNotifications(ctx)
+	// 把 channel 副本传给派发 goroutine —— 它只读自己的局部副本，
+	// 不再读取共享字段 c.notifyCh（避免与 disableSubscription 的置 nil 竞争）。
+	go c.dispatchNotifications(ctx, notifyCh)
 	logging.Info(logging.EventChannelEstablished).
 		Str("channel", c.channelID).
 		Dur("interval", interval).
@@ -336,9 +338,16 @@ func (c *opcuaChannel) disableSubscription() {
 	if c.sub != nil {
 		_ = c.sub.Cancel(context.Background())
 	}
-	if c.notifyCh != nil {
-		close(c.notifyCh)
-	}
+	// 2026-10-26 修（去掉 close(c.notifyCh)）：
+	//   gopcua 的 publish 循环会在它自己的 goroutine 里向 notifyCh 发送，
+	//   Subscription.Cancel 不保证此刻没有发送正在进行 →
+	//   close(notifyCh) 存在 "send on closed channel" 的 panic 风险。
+	//
+	//   正确做法：不关闭 channel。上面的 cancel() 已经让消费侧
+	//   dispatchNotifications 通过 ctx.Done() 退出；channel 无生产者后自然回收。
+	//
+	//   旧实现里 close(c.notifyCh) 与 dispatchNotifications 读 c.notifyCh 的
+	//   并发，还构成了 -race 报告的 data race。
 	c.sub = nil
 	c.notifyCh = nil
 	c.cancel = nil
@@ -393,12 +402,30 @@ func (c *opcuaChannel) AddMonitoredItem(ctx context.Context, address string) err
 	return nil
 }
 
-func (c *opcuaChannel) dispatchNotifications(ctx context.Context) {
+func (c *opcuaChannel) dispatchNotifications(ctx context.Context, notifyCh chan *opcua.PublishNotificationData) {
+	// 2026-10-26 修（data race）：
+	//   原来这里读的是共享字段 c.notifyCh，而 disableSubscription 会在 subMu 锁内
+	//   把它置 nil → "读 c.notifyCh" 与 "写 c.notifyCh = nil" 构成 data race
+	//   （-race 下 CI 判失败）。
+	//
+	//   修法：把 channel 作为**参数**传进来 —— 每个订阅周期一份不可变副本，
+	//   goroutine 全程只读自己的局部变量，不碰共享字段 → race 消除。
+	//
+	//   生命周期：ctx 取消（本函数唯一的退出路径）由 disableSubscription 触发，
+	//   退出后 goroutine 返回，channel 随之被 GC。
+	//
+	//   为什么不再 close(notifyCh)：
+	//   gopcua 的 Subscription.publish 循环会在**它自己的 goroutine**里向
+	//   notifyCh 发送（见 client_sub.go: notifySubscription → sub.notify → s.Notifs <- data），
+	//   而 Subscription.Cancel 并不保证此刻没有发送正在进行 →
+	//   close(notifyCh) 存在 "send on closed channel" 的 panic 风险。
+	//   正确做法是**不关闭** channel，靠 ctx 取消让消费侧退出；
+	//   channel 无生产者时自然被回收。
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case res, ok := <-c.notifyCh:
+		case res, ok := <-notifyCh:
 			if !ok {
 				return
 			}

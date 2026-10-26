@@ -250,6 +250,23 @@ type Queue struct {
 	enqueued atomic.Uint64
 	closed   atomic.Bool
 
+	// closeMu 保护 ch 的 close 动作与 send 动作的互斥（Plan2 7.2 竞态修复）。
+	//
+	// 为什么需要它（2026-10-26 修）：
+	//   "q.closed.Load() == false" 与 "q.ch <- v" 之间存在 toctou 窗口，
+	//   期间另一个 goroutine 调 Close → close(q.ch) 与 send 并发 → data race
+	//   （且在旧实现里会 panic: send on closed channel）。
+	//
+	// 为什么用 RWMutex 而不是只靠 recover 兜底：
+	//   recover 只能防住 panic，消不掉 race —— `-race` 下 CI 依然判失败。
+	//
+	// 为什么是 RWMutex 而不是普通 Mutex：
+	//   Enqueue 是采集热路径（每点位每周期一次），Close 是低频事件（配置重载）。
+	//   读锁允许多个 Enqueue 并发进行，互斥只发生在真正 close 的瞬间。
+	//
+	// 锁序：closeMu 不与其他锁嵌套，Close 内部不调用任何会回调进来的方法。
+	closeMu sync.RWMutex
+
 	// targetBizID 用于 Prometheus 指标打标签（plcbridge_target_dropped_total）。
 	//
 	// 为什么存 ID 而不是只靠调用方传：
@@ -284,7 +301,26 @@ func (q *Queue) reportDropped(reason string, n uint64) {
 
 // Close 关闭队列。已关闭后 Enqueue 直接 drop；Dequeue/Raw 立即收到 closed 信号。
 // 关闭后 router 不再持有该 queue，避免 reload 后旧 buffer 永久累积。
+//
+// 2026-10-26 修（消除 close/send data race）：
+//
+//	旧实现：CompareAndSwap 与 close(q.ch) 都没有锁保护，
+//	与 Enqueue 的 "q.ch <- v" 并发 → data race（旧代码还有 panic: send on closed channel）。
+//
+//	现在：整个"标记关闭 + 关闭 channel"都在 closeMu 写锁内完成。
+//	与 Enqueue 的读锁互斥，于是形成严格的 happens-before：
+//	  - Enqueue 持读锁期间看到 closed==false → Close 不可能同时持写锁 → channel 一定未关 → send 安全
+//	  - Close 完成后再进来的 Enqueue → 看到 closed==true → 走 drop 分支
+//
+//	CAS 放在锁内而不是锁外，是为了避免"标记已关闭"与"真正关闭 channel"之间出现窗口：
+//	若 CAS 在锁外，Enqueue 可能在 CAS 之后、close 之前拿到读锁并发送 —— 虽然此时
+//	channel 还没关不会 panic，但会往一个"已标记关闭"的队列写入数据（语义错误）。
+//
+//	死锁检查：Close 只持写锁并调用 close()（不回调任何用户代码）；
+//	Enqueue 只持读锁且内部不请求写锁 → 不存在循环等待。
 func (q *Queue) Close() {
+	q.closeMu.Lock()
+	defer q.closeMu.Unlock()
 	if !q.closed.CompareAndSwap(false, true) {
 		return
 	}
@@ -293,6 +329,12 @@ func (q *Queue) Close() {
 
 // Clear 非阻塞排空队列中的所有数据（不清除统计计数器）。用于停用 device
 // 时清理 router 中缓存的历史数据，避免 forward worker 启动后一次性冲刷。
+//
+// 2026-10-26 说明：这里**不**持 closeMu 读锁。
+//
+//	依据：Go 内存模型中 "close(ch)" 与 "从 ch 接收" 安全同步（race detector 不报）。
+//	Clear 只做接收，与 Enqueue 的发送之间也不冲突（channel 本身支持并发收发）。
+//	需要互斥的只有"发送"与"关闭"，那已由 closeMu 覆盖。
 func (q *Queue) Clear() int {
 	n := 0
 	for {
@@ -309,20 +351,43 @@ func (q *Queue) Clear() int {
 
 // Enqueue 非阻塞入队，满了删除队头。queue 已关闭时直接 drop。
 //
-// 关闭竞态（Plan2 7.2 bugfix）：
+// 关闭竞态（Plan2 7.2 bugfix，2026-10-26 修正）：
 //
 //	Enqueue 与 Close 不在同一个锁里，"closed.Load() == false" 与 "q.ch <- v" 之间存在
-//	toctou 窗口：另一个 goroutine 正好在此期间调 Close → 关闭后的 channel send 会 panic。
-//	标准解法：把 send 包到带 recover 的闭包里，把 panic 转换成 dropped 计数 + warn 日志。
-//	性能：闭包 + recover 每次 Enqueue 多 ~50ns，可接受（与 PLC 周期 1ms 相比可忽略）。
+//	toctou 窗口：另一个 goroutine 正好在此期间调 Close → 关闭后的 channel send 会 panic，
+//	且 close/send 并发本身就是 data race（-race 下 CI 判失败，recover 消不掉）。
+//
+//	现在的修法：send 全程持有 closeMu 读锁，Close 的 close() 持写锁 → 两者互斥，
+//	既不会 panic，也没有 race。recover 保留作为兜底（防止将来有人绕过锁直接 send）。
+//
+//	性能：读锁是热路径上的轻量操作（与 PLC 周期 1ms 相比可忽略）；
+//	且多 producer 之间不互斥（RWMutex 读锁可并发）。
 func (q *Queue) Enqueue(v PointValue) {
+	// 快路径：已关闭则直接 drop，不进锁（reload 后队列已废弃时 Enqueue 仍会被调用，
+	// 不走锁能避免无谓的锁竞争）。
 	if q.closed.Load() {
 		q.dropped.Add(1)
 		q.reportDropped("closed", 1)
 		return
 	}
+
+	// closeMu 读锁：与 Close 的写锁互斥，保证 send 期间 channel 不会被 close。
+	q.closeMu.RLock()
+	defer q.closeMu.RUnlock()
+
+	// 锁内复查（权威检查）：
+	//   Close 的 "CAS closed=true + close(ch)" 整体在写锁内完成。
+	//   本 goroutine 若在 Close 之前拿到读锁，则 Close 还在等写锁 → channel 未关 → send 安全；
+	//   若在 Close 之后拿到读锁，则必然看到 closed==true → 走 drop 分支。
+	//   这次复查与 Close 的 CAS 之间存在 happens-before 关系，因此是可靠的。
+	if q.closed.Load() {
+		q.dropped.Add(1)
+		q.reportDropped("closed", 1)
+		return
+	}
+
 	for {
-		// trySend 把 send 包到闭包里，捕获 toctou 窗口里的 "send on closed channel" panic
+		// trySend 把 send 包到闭包里，作为兜底防止任何漏网的 "send on closed channel" panic
 		// 返回 (ok, panicked)：ok 表示 send 真的完成；panicked 表示与 Close 竞态 → drop
 		trySend := func() (ok, panicked bool) {
 			defer func() {
@@ -369,6 +434,13 @@ func (q *Queue) Enqueue(v PointValue) {
 }
 
 // Dequeue 阻塞出队，ctx 取消或 queue 关闭时退出。
+//
+// 2026-10-26 说明：这里**不**持 closeMu 读锁。
+//
+//	依据：Go 内存模型中 "close(ch)" 与 "从 ch 接收" 是正确同步的一对，
+//	race detector 不会把二者报告为竞争（已用最小复现验证）。
+//	若在此处持读锁反而会死锁：Dequeue 阻塞在接收上不放锁，
+//	而 Close 需要写锁 → 队列永远不会被关闭 → Dequeue 永远不返回。
 func (q *Queue) Dequeue(ctx context.Context) (PointValue, bool) {
 	select {
 	case v, ok := <-q.ch:
@@ -379,6 +451,10 @@ func (q *Queue) Dequeue(ctx context.Context) (PointValue, bool) {
 }
 
 // Raw 暴露原始 channel（用于非阻塞 select）。
+//
+// 2026-10-26 说明：返回裸 channel 不引入 race —— 调用方从中接收，
+// 与 Close 的 close() 之间是 Go 内存模型认可的安全组合。
+// 真正需要互斥的是"发送"与"关闭"，已由 closeMu 保证（见 Enqueue）。
 func (q *Queue) Raw() <-chan PointValue { return q.ch }
 
 // Closed 返回 queue 是否已关闭。
